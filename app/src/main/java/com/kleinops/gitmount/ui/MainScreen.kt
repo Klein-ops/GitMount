@@ -7,11 +7,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.PlayArrow
@@ -315,131 +317,117 @@ private fun SetupDialog(
         onDismissRequest = { if (!isWorking) onDismiss() },
         title = { Text("配置") },
         text = {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                item {
-                    Text(
-                        "GitHub 访问令牌",
-                        style = MaterialTheme.typography.labelLarge,
-                    )
+            // 注意：AlertDialog 的 text 槽位高度有界，直接放 LazyColumn 会因约束冲突崩溃。
+            // 这里用带高度上限的可滚动 Column 替代。
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    "GitHub 访问令牌",
+                    style = MaterialTheme.typography.labelLarge,
+                )
+                OutlinedTextField(
+                    value = token,
+                    onValueChange = { token = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    placeholder = { Text("ghp_… 或 github_pat_…") },
+                    visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    supportingText = {
+                        Text(
+                            "需 repo 权限（classic 令牌）或 Contents 读写权限（fine-grained 令牌）",
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    },
+                )
+                TextButton(onClick = { showPassword = !showPassword }) {
+                    Text(if (showPassword) "隐藏令牌" else "显示令牌")
                 }
-                item {
-                    OutlinedTextField(
-                        value = token,
-                        onValueChange = { token = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        placeholder = { Text("ghp_… 或 github_pat_…") },
-                        visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        supportingText = {
-                            Text(
-                                "需 repo 权限（classic 令牌）或 Contents 读写权限（fine-grained 令牌）",
-                                style = MaterialTheme.typography.labelSmall,
-                            )
-                        },
-                    )
-                }
-                item {
-                    TextButton(onClick = { showPassword = !showPassword }) {
-                        Text(if (showPassword) "隐藏令牌" else "显示令牌")
-                    }
-                }
-                item {
-                    OutlinedTextField(
-                        value = repo,
-                        onValueChange = { repo = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("仓库名称") },
-                        placeholder = { Text("gitmount-data") },
-                    )
-                }
-                item {
-                    OutlinedTextField(
-                        value = owner,
-                        onValueChange = { owner = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("所有者（留空=令牌对应账号）") },
-                    )
-                }
-                item {
-                    OutlinedTextField(
-                        value = branch,
-                        onValueChange = { branch = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("分支") },
-                    )
-                }
+                OutlinedTextField(
+                    value = repo,
+                    onValueChange = { repo = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("仓库名称") },
+                    placeholder = { Text("gitmount-data") },
+                )
+                OutlinedTextField(
+                    value = owner,
+                    onValueChange = { owner = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("所有者（留空=令牌对应账号）") },
+                )
+                OutlinedTextField(
+                    value = branch,
+                    onValueChange = { branch = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("分支") },
+                )
 
-                item {
-                    Spacer(Modifier.height(4.dp))
-                    Text("服务设置", style = MaterialTheme.typography.labelLarge)
-                }
-                item {
-                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                        ServerMode.entries.forEachIndexed { index, m ->
-                            SegmentedButton(
-                                selected = mode == m,
-                                onClick = { mode = m },
-                                shape = SegmentedButtonDefaults.itemShape(index, ServerMode.entries.size),
-                            ) {
-                                Text(m.label)
-                            }
+                Spacer(Modifier.height(4.dp))
+                Text("服务设置", style = MaterialTheme.typography.labelLarge)
+
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    ServerMode.entries.forEachIndexed { index, m ->
+                        SegmentedButton(
+                            selected = mode == m,
+                            onClick = { mode = m },
+                            shape = SegmentedButtonDefaults.itemShape(index, ServerMode.entries.size),
+                        ) {
+                            Text(m.label)
                         }
                     }
                 }
-                item {
-                    OutlinedTextField(
-                        value = if (mode == ServerMode.FTP) ftpPort else webdavPort,
-                        onValueChange = {
-                            if (mode == ServerMode.FTP) ftpPort = it else webdavPort = it
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("端口") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        supportingText = {
-                            Text(
-                                if (mode == ServerMode.FTP) "建议 2121（1024 以上免 root）" else "建议 8080",
-                                style = MaterialTheme.typography.labelSmall,
-                            )
-                        },
-                    )
-                }
-                item {
-                    OutlinedTextField(
-                        value = username,
-                        onValueChange = { username = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("访问用户名") },
-                    )
-                }
-                item {
-                    OutlinedTextField(
-                        value = password,
-                        onValueChange = { password = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("访问密码") },
-                        visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                        supportingText = {
-                            Text(
-                                "仅用于局域网访问认证，可与 GitHub 令牌不同",
-                                style = MaterialTheme.typography.labelSmall,
-                            )
-                        },
-                    )
-                }
-                item {
-                    Text(
-                        "保存服务设置后，请到主界面启动服务；仓库信息需点击下方“保存并初始化”。",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+
+                OutlinedTextField(
+                    value = if (mode == ServerMode.FTP) ftpPort else webdavPort,
+                    onValueChange = {
+                        if (mode == ServerMode.FTP) ftpPort = it else webdavPort = it
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("端口") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    supportingText = {
+                        Text(
+                            if (mode == ServerMode.FTP) "建议 2121（1024 以上免 root）" else "建议 8080",
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    },
+                )
+                OutlinedTextField(
+                    value = username,
+                    onValueChange = { username = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("访问用户名") },
+                )
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("访问密码") },
+                    visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                    supportingText = {
+                        Text(
+                            "仅用于局域网访问认证，可与 GitHub 令牌不同",
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    },
+                )
+                Text(
+                    "保存服务设置后，请到主界面启动服务；仓库信息需点击下方“保存并初始化”。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         },
         confirmButton = {

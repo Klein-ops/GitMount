@@ -23,7 +23,13 @@ object NetUtils {
         }
     }
 
-    private fun isPrivate(ip: String): Boolean =
-        ip.startsWith("192.168.") || ip.startsWith("10.") ||
-            (ip.startsWith("172.") && ip.split(".").getOrNull(1)?.toIntOrNull() in 16..31)
+    private fun isPrivate(ip: String): Boolean {
+        if (ip.startsWith("192.168.") || ip.startsWith("10.")) return true
+        if (ip.startsWith("172.")) {
+            // 172.16.0.0/12
+            val second = ip.split(".").getOrNull(1)?.toIntOrNull() ?: return false
+            return second in 16..31
+        }
+        return false
+    }
 }

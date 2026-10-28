@@ -79,6 +79,9 @@ class MountService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                // 若本服务是通过 startForegroundService 拉起的，必须先 startForeground
+                // 才能安全退出，否则系统会抛 "did not then call Service.startForeground()"。
+                startForeground(NOTIF_ID, buildNotification(getString(R.string.notif_stopped), null))
                 shutdownServers()
                 stopSelf()
                 return START_NOT_STICKY
@@ -180,6 +183,9 @@ class MountService : Service() {
                 )
             } catch (e: Exception) {
                 LogBus.error("启动失败：${e.message}")
+                updateNotification(getString(R.string.notif_stopped), e.message)
+                // 先清理（reset 会清空状态），再把错误写回去，否则 UI 永远看不到失败原因
+                shutdownServers()
                 ServerController.setState(
                     ServerController.State(
                         running = false,
@@ -189,8 +195,6 @@ class MountService : Service() {
                         error = e.message ?: "未知错误",
                     )
                 )
-                updateNotification(getString(R.string.notif_stopped), e.message)
-                shutdownServers()
                 stopSelf()
             }
         }
@@ -253,7 +257,7 @@ class MountService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
 
-        val stopIntent = PendingIntent.getService(
+        val stopIntent = PendingIntent.getForegroundService(
             this,
             1,
             Intent(this, MountService::class.java).apply { action = ACTION_STOP },

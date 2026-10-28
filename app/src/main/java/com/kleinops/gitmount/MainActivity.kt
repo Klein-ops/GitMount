@@ -8,7 +8,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.runtime.LaunchedEffect
 import androidx.core.content.ContextCompat
 import com.kleinops.gitmount.ui.MainScreen
 import com.kleinops.gitmount.ui.theme.GitMountTheme

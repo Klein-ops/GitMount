@@ -81,19 +81,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
                 val owner = ownerInput.ifBlank { login }.trim()
                 val repo = repoInput.trim()
-                val existingBranch = client.getDefaultBranch(owner, repo)
-                val finalBranch = if (existingBranch != null) existingBranch else branch.ifBlank { "main" }
 
-                if (existingBranch == null) {
+                var resolvedBranch = client.getDefaultBranch(owner, repo)
+                if (resolvedBranch == null) {
                     LogBus.info("仓库 $owner/$repo 不存在，正在创建私有仓库…")
                     client.createPrivateRepo(repo)
                     LogBus.info("私有仓库创建成功")
+                    // 关键：GitHub 账号的默认分支可能是 main 也可能是 master，
+                    // 不能想当然用 "main"，必须回读仓库真实的默认分支。
+                    resolvedBranch = awaitDefaultBranch(client, owner, repo)
+                        ?: branch.ifBlank { "main" }
                 } else {
-                    LogBus.info("仓库 $owner/$repo 已存在，分支 $finalBranch")
+                    LogBus.info("仓库 $owner/$repo 已存在，默认分支 $resolvedBranch")
                 }
 
-                settingsRepo.saveRepo(token.trim(), owner, repo, finalBranch)
-                _setupState.value = SetupState.Success("配置完成：$owner/$repo（$finalBranch）")
+                settingsRepo.saveRepo(token.trim(), owner, repo, resolvedBranch)
+                _setupState.value = SetupState.Success("配置完成：$owner/$repo（$resolvedBranch）")
             } catch (e: Exception) {
                 val msg = friendly(e)
                 LogBus.error("初始化失败：$msg")
@@ -117,6 +120,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun clearLogs() = LogBus.clear()
+
+    /**
+     * 新建仓库后立即读取默认分支时，GitHub 可能尚未完成初始化（短暂 404）。
+     * 这里做有限次重试，避免把分支名存错导致后续所有读写失败。
+     */
+    private suspend fun awaitDefaultBranch(
+        client: GitHubClient,
+        owner: String,
+        repo: String,
+    ): String? {
+        repeat(5) { attempt ->
+            val branch = client.getDefaultBranch(owner, repo)
+            if (branch != null) return branch
+            if (attempt < 4) kotlinx.coroutines.delay(600)
+        }
+        return null
+    }
 
     private fun friendly(e: Throwable?): String {
         if (e == null) return "未知错误"
