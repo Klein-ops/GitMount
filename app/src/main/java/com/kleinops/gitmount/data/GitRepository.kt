@@ -43,12 +43,23 @@ class GitRepository(
 
     private val dirCache = ConcurrentHashMap<String, CacheEntry>()
 
-    /** 规范化路径：/a/b/ -> /a/b；"" -> "/" */
+    /**
+     * 规范化路径：把 ".." 与 "." 真正折叠掉，而不是直接拒绝。
+     *
+     * 折叠（而非拒绝）的原因：FTP 的 CDUP / 客户端的 "cd .." 必须能用。
+     * 越界安全由折叠规则本身保证——".." 在根目录上无操作，无法跳出根。
+     */
     fun normalize(path: String): String {
         val raw = path.replace('\\', '/')
-        val parts = raw.split('/').filter { it.isNotEmpty() && it != "." }
-        if (parts.any { it == ".." }) throw IOException("非法路径：$path")
-        return if (parts.isEmpty()) "/" else "/" + parts.joinToString("/")
+        val out = ArrayDeque<String>()
+        for (part in raw.split('/')) {
+            when {
+                part.isEmpty() || part == "." -> Unit
+                part == ".." -> if (out.isNotEmpty()) out.removeLast()
+                else -> out.addLast(part)
+            }
+        }
+        return if (out.isEmpty()) "/" else "/" + out.joinToString("/")
     }
 
     /** 内部形式 -> GitHub 相对路径（根为 ""） */
@@ -167,7 +178,8 @@ class GitRepository(
         if (norm == "/") return
         if (isDirectory(norm)) return
         if (exists(norm)) throw IOException("已存在同名文件：$norm")
-        ensureParentDirs("$norm/placeholder")
+        // 先确保父目录链存在（parentOf(norm) 才是 norm 的父目录）
+        ensureParentDirs(norm)
         val keepPath = toGitPath(norm) + "/" + KEEP_FILE
         val existing = client.getFileMeta(owner, repo, keepPath, branch)
         if (existing == null) {
@@ -180,12 +192,18 @@ class GitRepository(
         invalidate(norm)
     }
 
-    /** 递归创建父目录链 */
+    /**
+     * 递归创建父目录链。
+     *
+     * 注意：必须把 parent 本身递归传下去（ensureParentDirs(parent)），
+     * 早先写成 ensureParentDirs("$parent/x") 会让 parentOf 始终返回同一个 parent
+     * 导致无限递归 StackOverflow。
+     */
     private fun ensureParentDirs(filePath: String) {
         val parent = parentOf(normalize(filePath))
         if (parent == "/") return
         if (isDirectory(parent)) return
-        ensureParentDirs("$parent/x")
+        ensureParentDirs(parent)
         val keepPath = toGitPath(parent) + "/" + KEEP_FILE
         if (client.getFileMeta(owner, repo, keepPath, branch) == null) {
             client.putFile(owner, repo, keepPath, ByteArray(0), null, "创建目录 ${nameOf(parent)}", branch)
@@ -212,6 +230,7 @@ class GitRepository(
     }
 
     private fun deleteDirectoryRecursive(normDir: String) {
+        // list() 不含 .gitkeep 隐藏逻辑，占位文件也会被一并删掉，符合预期
         val children = list(normDir, useCache = false)
         for (child in children) {
             if (child.isDirectory) {
@@ -220,12 +239,7 @@ class GitRepository(
                 client.deleteFile(owner, repo, toGitPath(child.path), child.sha, "删除 ${child.name}", branch)
             }
         }
-        // 目录里可能有 .gitkeep，需要一并清理，否则删完目录后占位文件残留
         invalidate(normDir)
-        val remain = list(normDir, useCache = false)
-        for (r in remain) {
-            client.deleteFile(owner, repo, toGitPath(r.path), r.sha, "删除 ${r.name}", branch)
-        }
     }
 
     /** 移动/重命名（GitHub 无原生 move，走读-写-删） */
@@ -256,6 +270,36 @@ class GitRepository(
 
     fun formatTimestamp(date: Date): String =
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(date)
+
+    /** RFC 1123 时间格式（WebDAV getlastmodified） */
+    fun rfc1123(date: Date): String =
+        SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US).format(date)
+
+    /** ISO 8601 时间格式（WebDAV creationdate） */
+    fun iso8601(date: Date): String = "yyyy-MM-dd'T'HH:mm:ss'Z'".let { fmt ->
+        SimpleDateFormat(fmt, Locale.US).format(date)
+    }
+
+    /** 复制文件或目录（与 move 逻辑相同但保留源） */
+    fun copy(fromPath: String, toPath: String) {
+        val from = normalize(fromPath)
+        val to = normalize(toPath)
+        if (from == "/" || to == "/") throw IOException("不能复制根目录")
+        if (from == to) throw IOException("源和目标相同")
+        if (exists(to)) throw IOException("目标已存在：$to")
+        val node = stat(from) ?: throw FileNotFoundException("源不存在：$from")
+
+        if (node.isDirectory) {
+            createDirectory(to)
+            for (child in list(from, useCache = false)) {
+                if (child.name == KEEP_FILE) continue
+                copy(child.path, "$to/${child.name}")
+            }
+        } else {
+            val data = read(from)
+            write(to, data, "复制 ${node.name}")
+        }
+    }
 
     /** 仓库总配额参考（GitHub 建议单仓库 < 1GB） */
     fun usageHint(): String = "GitHub 建议私有仓库保持在 1GB 以内"

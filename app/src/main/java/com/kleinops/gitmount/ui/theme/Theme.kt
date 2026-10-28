@@ -61,7 +61,8 @@ private val DarkColors = darkColorScheme(
 @Composable
 fun GitMountTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = true,
+    // 默认关闭动态取色：应用有固定绿色调品牌色，跟随壁纸会破坏视觉一致性
+    dynamicColor: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     val colorScheme = when {
