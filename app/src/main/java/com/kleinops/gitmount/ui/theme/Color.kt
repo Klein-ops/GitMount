@@ -1,0 +1,53 @@
+package com.kleinops.gitmount.ui.theme
+
+import androidx.compose.ui.graphics.Color
+
+// 品牌色：偏黄的纯绿（非 teal/蓝绿），符合用户偏好
+val SeedGreen = Color(0xFF5E6F2E)
+val SeedGreenDark = Color(0xFFAEC97A)
+
+// Light
+val PrimaryLight = Color(0xFF4C5F1F)
+val OnPrimaryLight = Color(0xFFFFFFFF)
+val PrimaryContainerLight = Color(0xFFCDE896)
+val OnPrimaryContainerLight = Color(0xFF141D00)
+val SecondaryLight = Color(0xFF5A614B)
+val OnSecondaryLight = Color(0xFFFFFFFF)
+val SecondaryContainerLight = Color(0xFFDEE6CA)
+val OnSecondaryContainerLight = Color(0xFF171E0C)
+val TertiaryLight = Color(0xFF39656A)
+val OnTertiaryLight = Color(0xFFFFFFFF)
+val TertiaryContainerLight = Color(0xFFBCEBF0)
+val OnTertiaryContainerLight = Color(0xFF002022)
+val BackgroundLight = Color(0xFFFDFBF3)
+val OnBackgroundLight = Color(0xFF1C1C17)
+val SurfaceLight = Color(0xFFFDFBF3)
+val OnSurfaceLight = Color(0xFF1C1C17)
+val SurfaceVariantLight = Color(0xFFE2E3D5)
+val OnSurfaceVariantLight = Color(0xFF45473E)
+val OutlineLight = Color(0xFF75786C)
+val ErrorLight = Color(0xFFBA1A1A)
+val OnErrorLight = Color(0xFFFFFFFF)
+
+// Dark
+val PrimaryDark = Color(0xFFB2CC7D)
+val OnPrimaryDark = Color(0xFF243300)
+val PrimaryContainerDark = Color(0xFF384B0A)
+val OnPrimaryContainerDark = Color(0xFFCDE896)
+val SecondaryDark = Color(0xFFC2CAAF)
+val OnSecondaryDark = Color(0xFF2C331F)
+val SecondaryContainerDark = Color(0xFF424A34)
+val OnSecondaryContainerDark = Color(0xFFDEE6CA)
+val TertiaryDark = Color(0xFFA1CFD4)
+val OnTertiaryDark = Color(0xFF00363A)
+val TertiaryContainerDark = Color(0xFF1F4D52)
+val OnTertiaryContainerDark = Color(0xFFBCEBF0)
+val BackgroundDark = Color(0xFF14140F)
+val OnBackgroundDark = Color(0xFFE5E2D8)
+val SurfaceDark = Color(0xFF14140F)
+val OnSurfaceDark = Color(0xFFE5E2D8)
+val SurfaceVariantDark = Color(0xFF45473E)
+val OnSurfaceVariantDark = Color(0xFFC6C7BA)
+val OutlineDark = Color(0xFF8F9185)
+val ErrorDark = Color(0xFFFFB4AB)
+val OnErrorDark = Color(0xFF690005)
