@@ -80,15 +80,16 @@ class WebDavHandler(
 
     private fun handleLock(exchange: HttpExchange) {
         val token = "opaquelocktoken:" + UUID.randomUUID()
-        val body = xmlEncode(
+        // 注意：这里返回的是 XML 文档本身，绝不能再经过 xmlEncode，
+        // 否则尖括号会被转义成 &lt; 导致客户端无法解析。
+        val body = "<?xml version=\"1.0\" encoding=\"utf-8\"?>" +
             "<D:prop xmlns:D=\"DAV:\"><D:lockdiscovery><D:activelock>" +
-                "<D:locktype><D:write/></D:locktype>" +
-                "<D:lockscope><D:exclusive/></D:lockscope>" +
-                "<D:depth>infinity</D:depth>" +
-                "<D:owner>GitMount</D:owner>" +
-                "<D:locktoken><D:href>$token</D:href></D:locktoken>" +
-                "</D:activelock></D:lockdiscovery></D:prop>"
-        )
+            "<D:locktype><D:write/></D:locktype>" +
+            "<D:lockscope><D:exclusive/></D:lockscope>" +
+            "<D:depth>infinity</D:depth>" +
+            "<D:owner>GitMount</D:owner>" +
+            "<D:locktoken><D:href>$token</D:href></D:locktoken>" +
+            "</D:activelock></D:lockdiscovery></D:prop>"
         exchange.respond(
             200,
             contentType = "application/xml; charset=utf-8",
@@ -202,6 +203,11 @@ class WebDavHandler(
 
     private fun handlePut(exchange: HttpExchange) {
         val path = repo.normalize(exchange.path)
+        // 分块传输的请求体未被解析，继续写会得到空文件（静默数据损坏），必须明确拒绝。
+        if (exchange.chunked) {
+            exchange.respond(411)
+            return
+        }
         val parentExists = repo.stat(repo.parentOf(path))?.isDirectory == true
         if (!parentExists) {
             exchange.respond(409)

@@ -127,8 +127,9 @@ class HttpServer(
             rawPath
         }
         val keepAlive = headers["connection"]?.equals("keep-alive", true) != false
+        val chunked = headers["transfer-encoding"]?.contains("chunked", true) == true
 
-        return HttpExchange(method, decodedPath, headers, body, keepAlive)
+        return HttpExchange(method, decodedPath, headers, body, keepAlive, chunked)
     }
 
     private fun readLine(input: InputStream): String? {
@@ -176,6 +177,8 @@ class HttpExchange(
     val headers: Map<String, String>,
     val body: ByteArray,
     val keepAlive: Boolean,
+    /** 请求体使用 Transfer-Encoding: chunked；本服务器不解析分块体，需由上层拒绝 */
+    val chunked: Boolean = false,
 ) {
     var status: Int = 200
     var responseHeaders: MutableMap<String, String> = mutableMapOf()
@@ -213,7 +216,8 @@ class HttpExchange(
             207 -> "Multi-Status"; 301 -> "Moved Permanently"; 304 -> "Not Modified"
             400 -> "Bad Request"; 401 -> "Unauthorized"; 403 -> "Forbidden"
             404 -> "Not Found"; 405 -> "Method Not Allowed"; 409 -> "Conflict"
-            412 -> "Precondition Failed"; 415 -> "Unsupported Media Type"
+            411 -> "Length Required"; 412 -> "Precondition Failed"
+            413 -> "Payload Too Large"; 415 -> "Unsupported Media Type"
             423 -> "Locked"; 500 -> "Internal Server Error"; 501 -> "Not Implemented"
             503 -> "Service Unavailable"; else -> "Unknown"
         }
