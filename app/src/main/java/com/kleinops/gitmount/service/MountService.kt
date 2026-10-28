@@ -60,7 +60,13 @@ class MountService : Service() {
             val intent = Intent(context, MountService::class.java).apply {
                 action = ACTION_STOP
             }
-            context.startService(intent)
+            // Android 8+ 应用退到后台后 startService 会抛 IllegalStateException，
+            // 这里统一走 startForegroundService；服务内 ACTION_STOP 分支会先 startForeground 再退出。
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
         }
     }
 
