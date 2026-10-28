@@ -8,7 +8,6 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.net.ServerSocket
 import java.net.Socket
-import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -121,7 +120,9 @@ class HttpServer(
         }
 
         val decodedPath = try {
-            URLDecoder.decode(rawPath.split("?")[0], StandardCharsets.UTF_8.name())
+            // 注意：不能用 URLDecoder.decode——它会把路径里的 '+' 变成空格，
+            // 导致名为 "a+b.txt" 的文件无法访问。这里只还原 %XX 转义。
+            percentDecode(rawPath.split("?")[0])
         } catch (e: Exception) {
             rawPath
         }
@@ -141,6 +142,31 @@ class HttpServer(
         }
         return sb.toString()
     }
+}
+
+/**
+ * 只还原 %XX 转义，保留 '+' 原义。
+ * URLDecoder 会把 '+' 解成空格，对文件路径而言是错误行为。
+ */
+internal fun percentDecode(input: String): String {
+    if (!input.contains('%')) return input
+    val out = ByteArrayOutputStream(input.length)
+    var i = 0
+    while (i < input.length) {
+        val c = input[i]
+        if (c == '%' && i + 2 < input.length) {
+            val hex = input.substring(i + 1, i + 3)
+            val value = hex.toIntOrNull(16)
+            if (value != null) {
+                out.write(value)
+                i += 3
+                continue
+            }
+        }
+        out.write(c.toString().toByteArray(StandardCharsets.UTF_8))
+        i++
+    }
+    return String(out.toByteArray(), StandardCharsets.UTF_8)
 }
 
 /** 一次 HTTP 交换：请求字段 + 响应字段 */

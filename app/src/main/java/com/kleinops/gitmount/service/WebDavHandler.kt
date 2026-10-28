@@ -299,11 +299,11 @@ class WebDavHandler(
 
     /** 从 Destination 头解析路径（http://host:port/a/b -> /a/b） */
     private fun extractDestinationPath(destination: String): String? {
-        // 取路径部分（去掉 scheme://host:port 和 query/fragment）
         val stripped = destination.substringBefore('?').substringBefore('#')
         val slashIdx = stripped.indexOf('/', stripped.indexOf("://") + 3)
         if (slashIdx < 0) return "/"
-        return java.net.URLDecoder.decode(stripped.substring(slashIdx), "UTF-8")
+        // 只还原 %XX，保留 '+'（URLDecoder 会把 '+' 变成空格）
+        return com.kleinops.gitmount.service.http.percentDecode(stripped.substring(slashIdx))
     }
 
     // ---------- 工具 ----------

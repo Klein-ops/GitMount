@@ -132,7 +132,11 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
             // 运行状态 + 控制
             item {
                 SectionCard(
-                    title = if (server.mode == ServerMode.WEBDAV) "WebDAV 服务" else "FTP 服务",
+                    title = if (settings.isConfigured) {
+                        "${runCatching { ServerMode.valueOf(settings.mode) }.getOrDefault(ServerMode.WEBDAV).label} 服务"
+                    } else {
+                        "服务"
+                    },
                     trailing = { StatusDot(running = server.running) },
                 ) {
                     if (server.starting) {
