@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">GitMount</string>
+
+    <string name="channel_server_name">挂载服务</string>
+    <string name="channel_server_desc">保持 FTP / WebDAV 服务在后台运行</string>
+
+    <string name="notif_starting">正在启动服务</string>
+    <string name="notif_running">%1$s 已就绪 · 端口 %2$d</string>
+    <string name="notif_stopped">服务已停止</string>
+    <string name="notif_action_stop">停止</string>
+</resources>
