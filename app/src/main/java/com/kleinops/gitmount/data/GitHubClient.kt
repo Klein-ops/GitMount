@@ -53,6 +53,24 @@ class GitHubClient(private val token: String) {
         }
     }
 
+    /**
+     * 单文件接口的响应必须是 JSON 对象。
+     * 若路径实际是目录，GitHub 返回 JSON 数组；旧实现直接 JSONObject(body) 会抛
+     * JSONException（"Value [...] cannot be converted to JSONObject"），
+     * 这种底层异常冒泡到协议层会变成难以理解的报错。这里统一转换成语义明确的异常。
+     */
+    private fun requireObject(body: String, path: String): JSONObject {
+        val trimmed = body.trimStart()
+        if (trimmed.startsWith("[")) {
+            throw GitHubApiException(409, "目标是一个目录而非文件：$path")
+        }
+        return try {
+            JSONObject(body)
+        } catch (e: Exception) {
+            throw GitHubApiException(502, "GitHub 返回了无法解析的响应")
+        }
+    }
+
     private fun extractErrorMessage(body: String): String {
         return try {
             val obj = JSONObject(body)
@@ -96,6 +114,10 @@ class GitHubClient(private val token: String) {
         val encodedPath = if (path.isEmpty()) "" else "/${encodePath(path)}"
         val url = url("/repos/$owner/$repo/contents$encodedPath") + "?ref=$branch"
         val body = execute(authRequest(url).get())
+        // 若该路径其实是文件，GitHub 返回单个对象；调用方传错时按“非目录”处理
+        if (!body.trimStart().startsWith("[")) {
+            throw GitHubApiException(409, "目标不是目录：$path")
+        }
         val arr = JSONArray(body)
         return buildList {
             for (i in 0 until arr.length()) {
@@ -122,7 +144,7 @@ class GitHubClient(private val token: String) {
     fun getFile(owner: String, repo: String, path: String, branch: String): Pair<ByteArray, FileMeta> {
         val url = url("/repos/$owner/$repo/contents/${encodePath(path)}") + "?ref=$branch"
         val body = execute(authRequest(url).get())
-        val o = JSONObject(body)
+        val o = requireObject(body, path)
         val sha = o.optString("sha")
         val size = o.optLong("size")
         val encoding = o.optString("encoding", "base64")
@@ -144,12 +166,14 @@ class GitHubClient(private val token: String) {
         return if (encoding == "base64") Base64.decode(b64, Base64.DEFAULT) else b64.toByteArray()
     }
 
-    /** 查询单文件元信息（不存在返回 null） */
+    /** 查询单文件元信息（不存在或目标是目录时返回 null） */
     fun getFileMeta(owner: String, repo: String, path: String, branch: String): FileMeta? {
         return try {
             val url = url("/repos/$owner/$repo/contents/${encodePath(path)}") + "?ref=$branch"
             val body = execute(authRequest(url).get())
-            val o = JSONObject(body)
+            // 目录会返回数组，对文件元信息查询而言视为“不是文件”
+            if (body.trimStart().startsWith("[")) return null
+            val o = requireObject(body, path)
             FileMeta(o.optString("sha"), o.optLong("size"))
         } catch (e: GitHubApiException) {
             if (e.code == 404) null else throw e
