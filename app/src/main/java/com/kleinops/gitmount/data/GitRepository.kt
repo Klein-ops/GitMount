@@ -117,10 +117,15 @@ class GitRepository(
         if (norm == "/") return VfsNode("/", "/", true, 0, "")
         val parent = parentOf(norm)
         val name = nameOf(norm)
-        // 先查父目录缓存/列表，命中即可判定类型，避免多余请求
-        val siblings = list(parent, useCache)
+        // 先查父目录列表，命中即可判定类型，避免多余请求。
+        // 父路径若是文件（而非目录），list 会抛异常，这里按“路径不存在”处理。
+        val siblings = try {
+            list(parent, useCache)
+        } catch (e: IOException) {
+            return null
+        }
         siblings.firstOrNull { it.name == name }?.let { return it }
-        // 列表里没有，可能是文件夹为空（GitHub 无空目录，通常不存在）；再尝试直接取元信息
+        // 列表里没有，再尝试直接取文件元信息（目录会返回 null）
         return try {
             val meta = client.getFileMeta(owner, repo, toGitPath(norm), branch) ?: return null
             VfsNode(name, norm, false, meta.size, meta.sha)
