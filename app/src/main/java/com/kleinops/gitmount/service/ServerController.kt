@@ -4,6 +4,7 @@ import com.kleinops.gitmount.data.LogEntry
 import com.kleinops.gitmount.data.ServerMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -14,16 +15,24 @@ object LogBus {
     private val _logs = MutableStateFlow<List<LogEntry>>(emptyList())
     val logs: StateFlow<List<LogEntry>> = _logs
 
-    private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
+    /**
+     * SimpleDateFormat 非线程安全，而日志会从 FTP 会话线程、HTTP 工作线程等多处写入，
+     * 因此用 ThreadLocal 隔离，避免时间串错乱。
+     */
+    private val timeFormat = object : ThreadLocal<SimpleDateFormat>() {
+        override fun initialValue(): SimpleDateFormat =
+            SimpleDateFormat("HH:mm:ss", Locale.US)
+    }
 
     fun info(msg: String) = add("INFO", msg)
     fun warn(msg: String) = add("WARN", msg)
     fun error(msg: String) = add("ERROR", msg)
 
     fun add(level: String, msg: String) {
-        val entry = LogEntry(timeFormat.format(Date()), level, msg)
-        // 最新的在最前，便于直接浏览
-        _logs.value = (listOf(entry) + _logs.value).take(MAX)
+        val time = timeFormat.get()?.format(Date()) ?: "--:--:--"
+        val entry = LogEntry(time, level, msg)
+        // 用 update 做原子读-改-写；直接赋值在并发下会丢失其他线程刚写入的条目
+        _logs.update { current -> (listOf(entry) + current).take(MAX) }
     }
 
     fun clear() {
@@ -61,7 +70,7 @@ object ServerController {
     }
 
     fun update(block: (State) -> State) {
-        _state.value = block(_state.value)
+        _state.update(block)
     }
 
     fun reset() {
