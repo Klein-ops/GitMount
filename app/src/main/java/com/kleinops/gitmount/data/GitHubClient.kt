@@ -19,6 +19,14 @@ data class FileMeta(
     val size: Long,
 )
 
+/** 仓库概要（用于“选择已有仓库”界面） */
+data class RepoBrief(
+    val name: String,
+    val fullName: String,
+    val isPrivate: Boolean,
+    val defaultBranch: String,
+)
+
 /**
  * GitHub REST API 客户端。
  * 覆盖本应用需要的全部操作：校验 token、创建私有仓库、列目录、读写删文件、目录建占位文件。
@@ -95,6 +103,30 @@ class GitHubClient(private val token: String) {
             JSONObject(body).optString("default_branch").ifBlank { "main" }
         } catch (e: GitHubApiException) {
             if (e.code == 404) null else throw e
+        }
+    }
+
+    /**
+     * 列出当前令牌可访问的仓库（本人拥有的，含私有）。
+     * 一次最多返回 100 个（按最近更新排序）；超出时可分页，这里保持简单。
+     */
+    fun listUserRepos(): List<RepoBrief> {
+        val body = execute(
+            authRequest(url("/user/repos?affiliation=owner&per_page=100&sort=updated")).get()
+        )
+        val arr = JSONArray(body)
+        return buildList {
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                add(
+                    RepoBrief(
+                        name = o.optString("name"),
+                        fullName = o.optString("full_name"),
+                        isPrivate = o.optBoolean("private"),
+                        defaultBranch = o.optString("default_branch").ifBlank { "main" },
+                    )
+                )
+            }
         }
     }
 

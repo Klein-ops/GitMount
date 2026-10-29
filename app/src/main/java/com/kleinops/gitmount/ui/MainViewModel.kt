@@ -7,6 +7,7 @@ import com.kleinops.gitmount.data.AppSettings
 import com.kleinops.gitmount.data.GitHubApiException
 import com.kleinops.gitmount.data.GitHubClient
 import com.kleinops.gitmount.data.LogEntry
+import com.kleinops.gitmount.data.RepoBrief
 import com.kleinops.gitmount.data.ServerMode
 import com.kleinops.gitmount.data.SettingsRepository
 import com.kleinops.gitmount.service.LogBus
@@ -25,6 +26,14 @@ sealed interface SetupState {
     data class Error(val message: String) : SetupState
 }
 
+/** 扫描令牌名下仓库的状态 */
+sealed interface ScanState {
+    data object Idle : ScanState
+    data object Working : ScanState
+    data class Success(val login: String, val repos: List<RepoBrief>) : ScanState
+    data class Error(val message: String) : ScanState
+}
+
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val settingsRepo = SettingsRepository(app)
@@ -37,6 +46,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _setupState = MutableStateFlow<SetupState>(SetupState.Idle)
     val setupState: StateFlow<SetupState> = _setupState
+
+    private val _scanState = MutableStateFlow<ScanState>(ScanState.Idle)
+    val scanState: StateFlow<ScanState> = _scanState
 
     private val _testing = MutableStateFlow(false)
     val testing: StateFlow<Boolean> = _testing
@@ -56,53 +68,87 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** 校验 token 并扫描该账号名下的仓库（用于选择“绑定已有仓库”） */
+    fun scanRepos(token: String) {
+        val t = token.trim()
+        if (t.isBlank()) {
+            _scanState.value = ScanState.Error("请填写 GitHub 访问令牌")
+            return
+        }
+        _scanState.value = ScanState.Working
+        viewModelScope.launch {
+            try {
+                val client = GitHubClient(t)
+                val login = client.getUser()
+                if (login.isBlank()) throw IllegalStateException("令牌无效")
+                LogBus.info("Token 校验通过，账号 $login")
+                val repos = client.listUserRepos()
+                _scanState.value = ScanState.Success(login, repos)
+            } catch (e: Exception) {
+                val msg = friendly(e)
+                LogBus.error("扫描仓库失败：$msg")
+                _scanState.value = ScanState.Error(msg)
+            }
+        }
+    }
+
     /**
-     * 一键初始化：
-     * 1) 校验 token
-     * 2) 仓库不存在则创建私有仓库
-     * 3) 保存配置
+     * 绑定或创建仓库并保存配置。
+     * @param createNew true = 创建新私有仓库；false = 绑定已有仓库（owner/repo 必须已存在）
      */
-    fun setupRepo(token: String, ownerInput: String, repoInput: String, branch: String) {
-        if (token.isBlank()) {
+    fun setupRepo(token: String, owner: String, repo: String, branch: String, createNew: Boolean) {
+        val t = token.trim()
+        if (t.isBlank()) {
             _setupState.value = SetupState.Error("请填写 GitHub 访问令牌")
             return
         }
-        if (repoInput.isBlank()) {
+        if (repo.isBlank()) {
             _setupState.value = SetupState.Error("请填写仓库名称")
             return
         }
         _setupState.value = SetupState.Working
         viewModelScope.launch {
             try {
-                val client = GitHubClient(token.trim())
-                val login = client.getUser()
-                if (login.isBlank()) throw IllegalStateException("令牌无效")
-                LogBus.info("Token 校验通过，账号 $login")
-
-                val owner = ownerInput.ifBlank { login }.trim()
-                val repo = repoInput.trim()
-
-                var resolvedBranch = client.getDefaultBranch(owner, repo)
-                if (resolvedBranch == null) {
-                    LogBus.info("仓库 $owner/$repo 不存在，正在创建私有仓库…")
+                val client = GitHubClient(t)
+                if (createNew) {
+                    val login = client.getUser()
+                    if (login.isBlank()) throw IllegalStateException("令牌无效")
+                    val resolvedOwner = owner.ifBlank { login }.trim()
+                    // 兜底：若仓库已存在（用户手动输入了已有仓库名），自动切换为绑定，避免 422。
+                    val existing = client.getDefaultBranch(resolvedOwner, repo)
+                    if (existing != null) {
+                        LogBus.info("仓库已存在，自动切换为绑定：$resolvedOwner/$repo")
+                        settingsRepo.saveRepo(t, resolvedOwner, repo, existing)
+                        _setupState.value = SetupState.Success("已绑定：$resolvedOwner/$repo（$existing）")
+                        return@launch
+                    }
+                    LogBus.info("正在创建私有仓库 $resolvedOwner/$repo …")
                     client.createPrivateRepo(repo)
                     LogBus.info("私有仓库创建成功")
                     // 关键：GitHub 账号的默认分支可能是 main 也可能是 master，
                     // 不能想当然用 "main"，必须回读仓库真实的默认分支。
-                    resolvedBranch = awaitDefaultBranch(client, owner, repo)
+                    val resolvedBranch = awaitDefaultBranch(client, resolvedOwner, repo)
                         ?: branch.ifBlank { "main" }
+                    settingsRepo.saveRepo(t, resolvedOwner, repo, resolvedBranch)
+                    _setupState.value = SetupState.Success("已创建并绑定：$resolvedOwner/$repo（$resolvedBranch）")
                 } else {
-                    LogBus.info("仓库 $owner/$repo 已存在，默认分支 $resolvedBranch")
+                    val resolvedOwner = owner.ifBlank { loginFallback(client) }.trim()
+                    val resolvedBranch = client.getDefaultBranch(resolvedOwner, repo)
+                        ?: throw GitHubApiException(404, "仓库 $resolvedOwner/$repo 不存在或无权访问")
+                    settingsRepo.saveRepo(t, resolvedOwner, repo, resolvedBranch)
+                    _setupState.value = SetupState.Success("已绑定：$resolvedOwner/$repo（$resolvedBranch）")
                 }
-
-                settingsRepo.saveRepo(token.trim(), owner, repo, resolvedBranch)
-                _setupState.value = SetupState.Success("配置完成：$owner/$repo（$resolvedBranch）")
             } catch (e: Exception) {
                 val msg = friendly(e)
                 LogBus.error("初始化失败：$msg")
                 _setupState.value = SetupState.Error(msg)
             }
         }
+    }
+
+    private fun loginFallback(client: GitHubClient): String {
+        val login = runCatching { client.getUser() }.getOrNull()
+        return if (login.isNullOrBlank()) "owner" else login
     }
 
     fun saveServerSettings(mode: ServerMode, ftpPort: Int, webdavPort: Int, username: String, password: String) {
@@ -117,6 +163,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearSetupMessage() {
         _setupState.value = SetupState.Idle
+    }
+
+    fun clearScanState() {
+        _scanState.value = ScanState.Idle
     }
 
     fun clearLogs() = LogBus.clear()

@@ -76,22 +76,18 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
     val server by vm.serverState.collectAsStateWithLifecycle()
     val logs by vm.logs.collectAsStateWithLifecycle()
     val setupState by vm.setupState.collectAsStateWithLifecycle()
+    val scanState by vm.scanState.collectAsStateWithLifecycle()
 
     var showSetup by remember { mutableStateOf(false) }
 
-    // 初始化结果反馈
+    // 初始化成功：关闭对话框并用 Snackbar 提示。
+    // 初始化失败不在此处理——错误会直接显示在配置对话框内部，
+    // 避免 AlertDialog 遮挡底部 Snackbar 导致用户看不到具体原因。
     LaunchedEffect(setupState) {
-        when (val s = setupState) {
-            is SetupState.Success -> {
-                snackbar.showSnackbar(s.message)
-                showSetup = false
-                vm.clearSetupMessage()
-            }
-            is SetupState.Error -> {
-                snackbar.showSnackbar("失败：${s.message}")
-                vm.clearSetupMessage()
-            }
-            else -> Unit
+        if (setupState is SetupState.Success) {
+            snackbar.showSnackbar((setupState as SetupState.Success).message)
+            showSetup = false
+            vm.clearSetupMessage()
         }
     }
 
@@ -281,15 +277,18 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
             initialUsername = settings.username,
             initialPassword = settings.password,
             isWorking = setupState is SetupState.Working,
+            scanState = scanState,
+            setupState = setupState,
             onDismiss = {
                 showSetup = false
                 vm.clearSetupMessage()
+                vm.clearScanState()
             },
         )
     }
 }
 
-/** 配置对话框：仓库设置 + 服务设置 */
+/** 配置对话框：令牌 → 扫描仓库 → 绑定已有 / 创建新仓库 + 服务设置 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SetupDialog(
@@ -304,6 +303,8 @@ private fun SetupDialog(
     initialUsername: String,
     initialPassword: String,
     isWorking: Boolean,
+    scanState: ScanState,
+    setupState: SetupState,
     onDismiss: () -> Unit,
 ) {
     var token by remember { mutableStateOf(initialToken) }
@@ -316,6 +317,18 @@ private fun SetupDialog(
     var username by remember { mutableStateOf(initialUsername) }
     var password by remember { mutableStateOf(initialPassword) }
     var showPassword by remember { mutableStateOf(false) }
+
+    // 判定：owner/repo 与某个已配置/扫描到的仓库匹配 → 绑定已有仓库；否则创建新仓库。
+    // 注意要兼容两种情况：
+    //  1) 已保存过配置，用户只是重开对话框改设置 → 默认按“绑定”处理，避免误显示“创建”。
+    //  2) 通过“扫描我的仓库”选中 → 按“绑定”处理。
+    val selectedRepo = (scanState as? ScanState.Success)
+        ?.repos
+        ?.firstOrNull { it.fullName.equals("${owner.trim()}/${repo.trim()}", ignoreCase = true) }
+    val keepsExisting = initialRepo.isNotBlank() &&
+        repo.trim().equals(initialRepo.trim(), ignoreCase = true) &&
+        owner.trim().equals(initialOwner.trim(), ignoreCase = true)
+    val isBinding = selectedRepo != null || keepsExisting
 
     AlertDialog(
         onDismissRequest = { if (!isWorking) onDismiss() },
@@ -331,8 +344,9 @@ private fun SetupDialog(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Text(
-                    "GitHub 访问令牌",
+                    "GitHub 访问令牌 *",
                     style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
                 )
                 OutlinedTextField(
                     value = token,
@@ -352,27 +366,99 @@ private fun SetupDialog(
                 TextButton(onClick = { showPassword = !showPassword }) {
                     Text(if (showPassword) "隐藏令牌" else "显示令牌")
                 }
-                OutlinedTextField(
-                    value = repo,
-                    onValueChange = { repo = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("仓库名称") },
-                    placeholder = { Text("gitmount-data") },
-                )
+
+                // 扫描并选择已有仓库
+                TextButton(
+                    onClick = { vm.scanRepos(token) },
+                    enabled = !isWorking && scanState !is ScanState.Working,
+                ) {
+                    if (scanState is ScanState.Working) {
+                        CircularProgressIndicator(modifier = Modifier.width(14.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text("扫描中…")
+                    } else {
+                        Text("扫描我的仓库（绑定已有）")
+                    }
+                }
+
+                when (val s = scanState) {
+                    is ScanState.Working -> Unit
+                    is ScanState.Error -> Text(
+                        "扫描失败：${s.message}",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    is ScanState.Success -> {
+                        Text(
+                            "账号 ${s.login}，共 ${s.repos.size} 个仓库。点击下方仓库即可选中绑定；也可以在下方面板输入新仓库名来创建。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        if (s.repos.isNotEmpty()) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 140.dp)
+                                    .verticalScroll(rememberScrollState()),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                s.repos.forEach { r ->
+                                    val full = r.fullName
+                                    val isSel = full.equals("${owner.trim()}/${repo.trim()}", ignoreCase = true)
+                                    OutlinedButton(
+                                        onClick = {
+                                            owner = full.substringBefore('/')
+                                            repo = r.name
+                                            branch = r.defaultBranch
+                                        },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    ) {
+                                        Text(
+                                            if (isSel) "✓ " else "",
+                                            color = MaterialTheme.colorScheme.primary,
+                                        )
+                                        Text(
+                                            (if (r.isPrivate) "🔒 " else "") + "$full（${r.defaultBranch}）",
+                                            maxLines = 1,
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ScanState.Idle -> Unit
+                }
+
+                Spacer(Modifier.height(4.dp))
+                Text("仓库（绑定已有或创建新仓库）", style = MaterialTheme.typography.labelLarge)
                 OutlinedTextField(
                     value = owner,
                     onValueChange = { owner = it },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    label = { Text("所有者（留空=令牌对应账号）") },
+                    label = { Text("所有者（创建时可留空，默认令牌账号）") },
+                )
+                OutlinedTextField(
+                    value = repo,
+                    onValueChange = { repo = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("仓库名称 *") },
+                    placeholder = { Text("gitmount-data") },
                 )
                 OutlinedTextField(
                     value = branch,
                     onValueChange = { branch = it },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    label = { Text("分支") },
+                    label = { Text("分支（绑定已有时自动填入）") },
+                )
+                Text(
+                    if (isBinding) "将绑定已有私有仓库：${owner.trim()}/${repo.trim()}"
+                    else "将创建新的私有仓库：${owner.trim()}/${repo.trim()}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (isBinding) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary,
                 )
 
                 Spacer(Modifier.height(4.dp))
@@ -411,14 +497,14 @@ private fun SetupDialog(
                     onValueChange = { username = it },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    label = { Text("访问用户名") },
+                    label = { Text("访问用户名（可选）") },
                 )
                 OutlinedTextField(
                     value = password,
                     onValueChange = { password = it },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    label = { Text("访问密码") },
+                    label = { Text("访问密码（可选）") },
                     visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
                     supportingText = {
                         Text(
@@ -427,11 +513,15 @@ private fun SetupDialog(
                         )
                     },
                 )
-                Text(
-                    "保存服务设置后，请到主界面启动服务；仓库信息需点击下方“保存并初始化”。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+
+                // 初始化失败：直接显示在对话框内部，避免被对话框遮挡看不到
+                if (setupState is SetupState.Error) {
+                    Text(
+                        "保存失败：${(setupState as SetupState.Error).message}",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
             }
         },
         confirmButton = {
@@ -445,7 +535,7 @@ private fun SetupDialog(
                         username = username.trim(),
                         password = password,
                     )
-                    vm.setupRepo(token, owner, repo, branch)
+                    vm.setupRepo(token, owner, repo, branch, createNew = !isBinding)
                 },
             ) {
                 if (isWorking) {
@@ -456,7 +546,13 @@ private fun SetupDialog(
                     )
                     Spacer(Modifier.width(8.dp))
                 }
-                Text(if (isWorking) "处理中…" else "保存并初始化")
+                Text(
+                    when {
+                        isWorking -> "处理中…"
+                        isBinding -> "绑定并保存"
+                        else -> "创建并保存"
+                    }
+                )
             }
         },
         dismissButton = {
