@@ -42,8 +42,10 @@ class GitHubClient(private val token: String) {
         .addHeader("Accept", "application/vnd.github+json")
         .addHeader("X-GitHub-Api-Version", "2022-11-28")
 
-    private fun execute(request: Request): String {
-        client.newCall(request).execute().use { resp ->
+    private fun execute(builder: Request.Builder): String {
+        // OkHttp Request.Builder 的 get/post/put/delete 均返回 Builder 本身，
+        // 需要显式 build() 得到 Request 才能交给 Call。
+        client.newCall(builder.build()).execute().use { resp ->
             val body = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
                 val msg = extractErrorMessage(body)

@@ -137,8 +137,9 @@ class HttpServer(
         var c = input.read()
         if (c == -1) return null
         while (c != -1) {
-            if (c == '\n') break
-            if (c != '\r') sb.append(c.toChar())
+            // read() 返回 Int，必须与 Char 的码值比较
+            if (c == '\n'.code) break
+            if (c != '\r'.code) sb.append(c.toChar())
             c = input.read()
         }
         return sb.toString()
