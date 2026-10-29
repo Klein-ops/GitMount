@@ -12,6 +12,7 @@ import com.kleinops.gitmount.data.ServerMode
 import com.kleinops.gitmount.data.SettingsRepository
 import com.kleinops.gitmount.service.LogBus
 import com.kleinops.gitmount.service.ServerController
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -55,7 +56,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 校验 token 并返回登录名（不落盘） */
     fun verifyToken(token: String, onResult: (Result<String>) -> Unit) {
-        viewModelScope.launch {
+        // GitHubClient 全部是同步阻塞调用，必须切到 IO 线程，
+        // 否则在默认主线程执行会抛 NetworkOnMainThreadException。
+        viewModelScope.launch(Dispatchers.IO) {
             _testing.value = true
             val result = runCatching { GitHubClient(token).getUser() }
             _testing.value = false
@@ -76,7 +79,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         _scanState.value = ScanState.Working
-        viewModelScope.launch {
+        // OkHttp 同步调用必须在 IO 线程执行，避免 NetworkOnMainThreadException
+        viewModelScope.launch(Dispatchers.IO) {
             try {
                 val client = GitHubClient(t)
                 val login = client.getUser()
@@ -107,7 +111,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         _setupState.value = SetupState.Working
-        viewModelScope.launch {
+        // OkHttp 同步调用必须在 IO 线程执行，避免 NetworkOnMainThreadException
+        viewModelScope.launch(Dispatchers.IO) {
             try {
                 val client = GitHubClient(t)
                 if (createNew) {
