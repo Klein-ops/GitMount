@@ -128,7 +128,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 查询仓库容量信息（size 包含提交历史；私有仓库配额 500MB） */
+    /** 查询仓库容量信息（size 包含提交历史；私有仓库配额 500MB，公开仓库无配额） */
     fun loadRepoInfo() {
         val s = settings.value
         if (s.token.isBlank() || s.owner.isBlank() || s.repoName.isBlank()) {

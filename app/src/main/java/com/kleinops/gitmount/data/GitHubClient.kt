@@ -30,24 +30,29 @@ data class RepoBrief(
 /**
  * 仓库容量信息。
  * GitHub 的 size 单位为 KB，且**包含全部提交历史**占用的空间；
- * 私有仓库免费额度为 500MB（GitHub 文档口径 1GB 是包含公有仓库的旧口径）。
+ * 私有仓库免费额度为 500MB；公开仓库没有存储配额上限。
  */
 data class RepoInfo(
     val owner: String,
     val repo: String,
     val sizeKb: Long,
+    /** 是否私有仓库。公开仓库无配额，UI 只展示已用容量，不展示剩余/占比/超限。 */
+    val isPrivate: Boolean,
     val defaultBranch: String,
 ) {
-    /** 私有仓库容量上限：500MB = 512000 KB */
+    /** 私有仓库容量上限：500MB = 512000 KB（仅对私有仓库有意义） */
     val quotaKb: Long get() = 500L * 1024
 
     val usedKb: Long get() = sizeKb
 
+    /** 剩余容量：仅私有仓库适用（公开仓库无配额，调用方应据 isPrivate 判断） */
     val remainingKb: Long get() = (quotaKb - sizeKb).coerceAtLeast(0)
 
+    /** 已用占比：仅私有仓库适用（公开仓库无配额，调用方应据 isPrivate 判断） */
     val percentUsed: Int
         get() = ((sizeKb.toDouble() / quotaKb) * 100).toInt().coerceIn(0, 100)
 
+    /** 是否超出配额：仅私有仓库适用（公开仓库无配额，调用方应据 isPrivate 判断） */
     val exceeded: Boolean get() = sizeKb > quotaKb
 
     /** 人类可读的已用容量（保留 1 位小数） */
@@ -144,7 +149,8 @@ class GitHubClient(private val token: String) {
 
     /**
      * 查询仓库容量信息（size 单位为 KB，包含提交历史）。
-     * 私有仓库免费额度 500MB；超限后写入会失败，需要清理历史或扩容。
+     * 私有仓库免费额度 500MB，超限后写入会失败，需要清理历史或扩容；
+     * 公开仓库无配额上限。
      */
     fun getRepoInfo(owner: String, repo: String): RepoInfo? {
         return try {
@@ -154,6 +160,7 @@ class GitHubClient(private val token: String) {
                 owner = owner,
                 repo = repo,
                 sizeKb = o.optLong("size"),
+                isPrivate = o.optBoolean("private", false),
                 defaultBranch = o.optString("default_branch").ifBlank { "main" },
             )
         } catch (e: GitHubApiException) {

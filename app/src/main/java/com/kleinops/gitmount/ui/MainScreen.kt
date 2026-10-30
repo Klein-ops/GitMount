@@ -310,26 +310,37 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                             is RepoOpState.Success -> {
                                 val info = op.info
                                 // 本地写入时直接在用后查询，命中缓存避免重复调用
+                                // 公开仓库 GitHub 无存储配额上限，只展示已用容量；私有仓库才展示
+                                // 剩余容量/占用比例/进度条/超限提示（配额 500MB）。
+                                InfoRow("仓库类型", if (info.isPrivate) "私有" else "公开", mono = true)
                                 InfoRow("已用容量", info.usedHuman, mono = true)
-                                InfoRow("剩余容量", info.remainingHuman, mono = true)
-                                InfoRow(
-                                    "占用比例",
-                                    "${info.percentUsed}% / 500MB",
-                                    mono = true,
-                                    valueColor = if (info.percentUsed >= 90) MaterialTheme.colorScheme.error
-                                    else MaterialTheme.colorScheme.primary,
-                                )
-                                Spacer(Modifier.height(6.dp))
-                                LinearProgressIndicator(
-                                    progress = { info.percentUsed / 100f },
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                                if (info.exceeded) {
-                                    Spacer(Modifier.height(4.dp))
+                                if (info.isPrivate) {
+                                    InfoRow("剩余容量", info.remainingHuman, mono = true)
+                                    InfoRow(
+                                        "占用比例",
+                                        "${info.percentUsed}% / 500MB",
+                                        mono = true,
+                                        valueColor = if (info.percentUsed >= 90) MaterialTheme.colorScheme.error
+                                        else MaterialTheme.colorScheme.primary,
+                                    )
+                                    Spacer(Modifier.height(6.dp))
+                                    LinearProgressIndicator(
+                                        progress = { info.percentUsed / 100f },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                    if (info.exceeded) {
+                                        Spacer(Modifier.height(4.dp))
+                                        Text(
+                                            "已超出仓库容量上限！请清理文件或清空提交历史。",
+                                            color = MaterialTheme.colorScheme.error,
+                                            style = MaterialTheme.typography.labelSmall,
+                                        )
+                                    }
+                                } else {
                                     Text(
-                                        "已超出仓库容量上限！请清理文件或清空提交历史。",
-                                        color = MaterialTheme.colorScheme.error,
+                                        "公开仓库无存储配额上限",
                                         style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                 }
                             }

@@ -359,7 +359,7 @@ class GitRepository(
         }
     }
 
-    /** 查询仓库容量信息（size 包含提交历史，单位 KB；私有仓库配额 500MB） */
+    /** 查询仓库容量信息（size 包含提交历史，单位 KB；私有仓库配额 500MB，公开仓库无配额） */
     fun repoInfo(): RepoInfo? = client.getRepoInfo(owner, repo)
 
     /**
