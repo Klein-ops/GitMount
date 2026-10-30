@@ -41,6 +41,7 @@ import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -598,30 +599,49 @@ private fun RepoSetupDialog(
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .heightIn(max = 140.dp)
+                                    .heightIn(max = 160.dp)
                                     .verticalScroll(rememberScrollState()),
                                 verticalArrangement = Arrangement.spacedBy(4.dp),
                             ) {
                                 s.repos.forEach { r ->
                                     val full = r.fullName
                                     val isSel = full.equals("${owner.trim()}/${repo.trim()}", ignoreCase = true)
-                                    OutlinedButton(
+                                    // 列表项：用 Surface 呈现可点击行，选中态高亮 + 对勾，而非一竖排按钮。
+                                    Surface(
                                         onClick = {
                                             owner = full.substringBefore('/')
                                             repo = r.name
                                             branch = r.defaultBranch
                                         },
                                         modifier = Modifier.fillMaxWidth(),
+                                        shape = MaterialTheme.shapes.small,
+                                        color = if (isSel) MaterialTheme.colorScheme.secondaryContainer
+                                        else MaterialTheme.colorScheme.surfaceVariant,
                                     ) {
-                                        Text(
-                                            if (isSel) "✓ " else "",
-                                            color = MaterialTheme.colorScheme.primary,
-                                        )
-                                        Text(
-                                            (if (r.isPrivate) "🔒 " else "") + "$full（${r.defaultBranch}）",
-                                            maxLines = 1,
-                                            style = MaterialTheme.typography.bodySmall,
-                                        )
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            Text(
+                                                if (isSel) "✓ " else "  ",
+                                                color = MaterialTheme.colorScheme.primary,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                            )
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    (if (r.isPrivate) "🔒 " else "") + full,
+                                                    maxLines = 1,
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                )
+                                                Text(
+                                                    "默认分支 ${r.defaultBranch}",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
