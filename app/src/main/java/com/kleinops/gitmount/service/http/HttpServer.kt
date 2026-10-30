@@ -63,7 +63,7 @@ class HttpServer(
     }
 
     private fun handle(socket: Socket) {
-        socket.soTimeout = 120_000
+        socket.soTimeout = 60_000
         BufferedInputStream(socket.getInputStream()).use { input ->
             BufferedOutputStream(socket.getOutputStream()).use { output ->
                 var keepAlive = true

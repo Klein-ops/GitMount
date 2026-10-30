@@ -49,6 +49,12 @@ class GitRepository(
         private const val FILE_CACHE_TTL_MS = 60_000L
         private const val FILE_CACHE_MAX_ENTRIES = 64
         private const val FILE_CACHE_MAX_BYTES = 24L * 1024 * 1024
+
+        /**
+         * 空闲回收阈值：距最后一次文件系统访问超过该时长，认为服务处于空闲，
+         * 清空全部缓存把内存还给系统（下次访问自然重建）。
+         */
+        const val IDLE_RECLAIM_MS = 5L * 60 * 1000
     }
 
     private class CacheEntry(val nodes: List<VfsNode>, val at: Long)
@@ -60,6 +66,21 @@ class GitRepository(
 
     /** 文件缓存总字节数（写入时累加、清空时归零，用于限制内存占用） */
     private val fileCacheBytes = java.util.concurrent.atomic.AtomicLong(0)
+
+    /** 最后一次文件系统访问时间（供空闲回收判断；写操作也视为活动） */
+    @Volatile
+    private var lastActiveAt: Long = System.currentTimeMillis()
+
+    /** 每次对外操作前调用：超过空闲阈值则清空缓存，把内存还给系统 */
+    private fun reclaimIfIdle() {
+        val now = System.currentTimeMillis()
+        if (now - lastActiveAt > IDLE_RECLAIM_MS) {
+            dirCache.clear()
+            fileCache.clear()
+            fileCacheBytes.set(0)
+        }
+        lastActiveAt = now
+    }
 
     /**
      * 规范化路径：把 ".." 与 "." 真正折叠掉，而不是直接拒绝。
@@ -125,6 +146,7 @@ class GitRepository(
 
     /** 列目录（带 TTL 缓存） */
     fun list(path: String, useCache: Boolean = true): List<VfsNode> {
+        reclaimIfIdle()
         val norm = normalize(path)
         val now = System.currentTimeMillis()
         if (useCache) {
@@ -180,6 +202,7 @@ class GitRepository(
 
     /** 读取文件字节（带内容缓存：sha 是内容哈希，命中即内容一致，安全） */
     fun read(path: String): ByteArray {
+        reclaimIfIdle()
         val norm = normalize(path)
         if (norm == "/") throw IOException("不能读取目录")
         return try {
@@ -197,6 +220,7 @@ class GitRepository(
 
     /** 读取文件并同时拿到 sha（上传前做乐观锁用；内容同样走缓存） */
     fun readWithMeta(path: String): Pair<ByteArray, FileMeta> {
+        reclaimIfIdle()
         val norm = normalize(path)
         if (norm == "/") throw IOException("不能读取目录")
         val cached = fileCache[norm]
@@ -213,6 +237,7 @@ class GitRepository(
      * 覆盖时总是先取最新 sha，避免客户端缓存过期导致 409 冲突。
      */
     fun write(path: String, data: ByteArray, commitMessage: String? = null): VfsNode {
+        reclaimIfIdle()
         val norm = normalize(path)
         if (norm == "/") throw IOException("不能写入根目录")
         if (data.size > MAX_FILE_SIZE) {
@@ -232,6 +257,7 @@ class GitRepository(
 
     /** 创建目录：GitHub 无空目录，用 .gitkeep 占位 */
     fun createDirectory(path: String) {
+        reclaimIfIdle()
         val norm = normalize(path)
         if (norm == "/") return
         if (isDirectory(norm)) return
@@ -272,6 +298,7 @@ class GitRepository(
 
     /** 删除文件或目录（目录递归删除） */
     fun delete(path: String) {
+        reclaimIfIdle()
         val norm = normalize(path)
         if (norm == "/") throw IOException("不能删除根目录")
         val node = stat(norm) ?: throw FileNotFoundException("不存在：$norm")

@@ -82,7 +82,15 @@ class FtpServer(
 
     /** 单个客户端会话 */
     private inner class FtpSession(private val socket: Socket) {
+        // 空闲命令连接超时：客户端长时间不发命令（或静默挂机）时回收线程，
+        // 避免长期占着会话线程。注意 FTP 数据连接（传输中）不受影响。
+        private val COMMAND_IDLE_TIMEOUT_MS = 60_000
+
         private val input: BufferedReader by lazy {
+            try {
+                socket.soTimeout = COMMAND_IDLE_TIMEOUT_MS
+            } catch (_: Exception) {
+            }
             BufferedReader(InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8))
         }
         private val output: OutputStream by lazy { socket.getOutputStream() }
