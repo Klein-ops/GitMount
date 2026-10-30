@@ -107,7 +107,7 @@ class GitRepository(
 
     /** 按内部路径移除文件内容缓存（同时扣减字节计数） */
     private fun evictFile(norm: String) {
-        fileCache.remove(norm)?.let { fileCacheBytes.addAndGet(-it.bytes.size) }
+        fileCache.remove(norm)?.let { fileCacheBytes.addAndGet(-it.bytes.size.toLong()) }
     }
 
     /** 写入文件内容缓存（只缓存 ≤1MB 小文件；超出条目或字节上限时整体清空，简单可靠） */
