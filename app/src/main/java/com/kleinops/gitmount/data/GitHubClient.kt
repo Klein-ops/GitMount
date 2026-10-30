@@ -167,10 +167,12 @@ class GitHubClient(private val token: String) {
      * 因此用它重建孤儿提交可以做到“全部文件保留、历史清空”。
      */
     fun getHeadTree(owner: String, repo: String, branch: String): Pair<String, String> {
-        val body = execute(authRequest(url("/repos/$owner/$repo/git/commits/$branch")).get())
+        // 注意：不能用 /git/commits/{branch} —— Git Data API 只接受 commit SHA，传分支名必 404。
+        // 用 Commits API（/commits/{ref}）接受 ref/分支名，顶层 sha 即最新提交，commit.tree.sha 即根 tree。
+        val body = execute(authRequest(url("/repos/$owner/$repo/commits/$branch")).get())
         val o = JSONObject(body)
         val commitSha = o.optString("sha")
-        val treeSha = o.optJSONObject("tree")?.optString("sha").orEmpty()
+        val treeSha = o.optJSONObject("commit")?.optJSONObject("tree")?.optString("sha").orEmpty()
         if (commitSha.isBlank() || treeSha.isBlank()) {
             throw GitHubApiException(502, "无法解析仓库提交信息")
         }
