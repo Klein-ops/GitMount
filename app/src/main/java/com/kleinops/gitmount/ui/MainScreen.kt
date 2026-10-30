@@ -212,7 +212,11 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                     }
 
                     Spacer(Modifier.height(16.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // 第一行：启动 / 停止独占整行，避免与下方按钮挤压导致文字换行
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
                         if (!server.running) {
                             Button(
                                 onClick = {
@@ -227,23 +231,43 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                                     }
                                 },
                                 enabled = !server.starting,
+                                modifier = Modifier.weight(1f),
                             ) {
                                 Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.width(18.dp))
                                 Spacer(Modifier.width(6.dp))
                                 Text("启动服务")
                             }
                         } else {
-                            OutlinedButton(onClick = { MountService.stop(context) }) {
+                            OutlinedButton(
+                                onClick = { MountService.stop(context) },
+                                modifier = Modifier.weight(1f),
+                            ) {
                                 Icon(Icons.Filled.Stop, contentDescription = null, modifier = Modifier.width(18.dp))
                                 Spacer(Modifier.width(6.dp))
                                 Text("停止服务")
                             }
                         }
-                        FilledTonalButton(onClick = { showRepoSetup = true }) {
-                            Text("仓库配置")
+                    }
+                    // 第二行：仓库配置 / 服务设置均分宽度，每个都带图标，风格与启动按钮一致
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        FilledTonalButton(
+                            onClick = { showRepoSetup = true },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Icon(Icons.Filled.Cloud, contentDescription = null, modifier = Modifier.width(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("仓库配置", maxLines = 1)
                         }
-                        FilledTonalButton(onClick = { showServerSetup = true }) {
-                            Text("服务设置")
+                        FilledTonalButton(
+                            onClick = { showServerSetup = true },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.width(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("服务设置", maxLines = 1)
                         }
                     }
                 }
