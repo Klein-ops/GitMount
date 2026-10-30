@@ -96,13 +96,16 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
     }
 
     // 初始化成功：关闭仓库对话框并用 Snackbar 提示。
+    // 注意：必须先关对话框再 showSnackbar——showSnackbar 是挂起函数，
+    // 若先弹 Snackbar 会一直挂起到播完，AlertDialog 又盖住它，导致对话框迟迟不退出。
     // 初始化失败不在此处理——错误会直接显示在配置对话框内部，
     // 避免 AlertDialog 遮挡底部 Snackbar 导致用户看不到具体原因。
     LaunchedEffect(setupState) {
         if (setupState is SetupState.Success) {
-            snackbar.showSnackbar((setupState as SetupState.Success).message)
+            val message = (setupState as SetupState.Success).message
             showRepoSetup = false
             vm.clearSetupMessage()
+            snackbar.showSnackbar(message)
         }
     }
 
