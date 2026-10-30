@@ -34,6 +34,8 @@ data class AppSettings(
     val password: String = "",
     /** true = 服务只监听 127.0.0.1，仅本机可访问，不暴露局域网 */
     val loopbackOnly: Boolean = false,
+    /** true = 隐藏前台服务常驻通知（改用静默渠道），降低后台存在感 */
+    val hideNotification: Boolean = false,
 ) {
     val isConfigured: Boolean get() = token.isNotBlank() && owner.isNotBlank() && repoName.isNotBlank()
 }
@@ -98,6 +100,7 @@ class SettingsRepository(private val context: Context) {
         val USERNAME = stringPreferencesKey("username")
         val PASSWORD = stringPreferencesKey("password")
         val LOOPBACK_ONLY = booleanPreferencesKey("loopback_only")
+        val HIDE_NOTIFICATION = booleanPreferencesKey("hide_notification")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { p ->
@@ -112,6 +115,7 @@ class SettingsRepository(private val context: Context) {
             username = p[Keys.USERNAME] ?: "gitmount",
             password = p[Keys.PASSWORD] ?: "",
             loopbackOnly = p[Keys.LOOPBACK_ONLY] ?: false,
+            hideNotification = p[Keys.HIDE_NOTIFICATION] ?: false,
         )
     }
 
@@ -124,7 +128,15 @@ class SettingsRepository(private val context: Context) {
         }
     }
 
-    suspend fun saveServer(mode: String, ftpPort: Int, webdavPort: Int, username: String, password: String, loopbackOnly: Boolean) {
+    suspend fun saveServer(
+        mode: String,
+        ftpPort: Int,
+        webdavPort: Int,
+        username: String,
+        password: String,
+        loopbackOnly: Boolean,
+        hideNotification: Boolean,
+    ) {
         context.dataStore.edit { p ->
             p[Keys.MODE] = mode
             p[Keys.FTP_PORT] = ftpPort
@@ -132,6 +144,7 @@ class SettingsRepository(private val context: Context) {
             p[Keys.USERNAME] = username
             p[Keys.PASSWORD] = password
             p[Keys.LOOPBACK_ONLY] = loopbackOnly
+            p[Keys.HIDE_NOTIFICATION] = hideNotification
         }
     }
 

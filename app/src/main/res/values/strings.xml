@@ -9,4 +9,16 @@
     <string name="notif_running">%1$s 已就绪 · 端口 %2$d</string>
     <string name="notif_stopped">服务已停止</string>
     <string name="notif_action_stop">停止</string>
+
+    <!-- 后台保活设置 -->
+    <string name="settings_bg_title">后台运行</string>
+    <string name="settings_bg_hide_notif">隐藏常驻通知</string>
+    <string name="settings_bg_hide_notif_desc">开启后顶部通知栏不再常驻显示服务状态，更省心；关闭服务需回到 App 操作</string>
+    <string name="settings_bg_battery">电池优化白名单</string>
+    <string name="settings_bg_battery_desc">跳转到系统设置，将 GitMount 设为「不优化」，防止系统在后台杀掉服务</string>
+    <string name="settings_bg_battery_btn">前往设置</string>
+
+    <!-- 静默通知渠道：隐藏通知时使用，Android 8+ 最低优先级，无声音无打扰 -->
+    <string name="channel_silent_name">挂载服务（静默）</string>
+    <string name="channel_silent_desc">服务在后台运行时使用，已隐藏，不产生通知</string>
 </resources>

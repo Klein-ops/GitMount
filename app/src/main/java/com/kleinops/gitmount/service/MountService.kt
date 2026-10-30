@@ -35,6 +35,7 @@ class MountService : Service() {
 
     companion object {
         private const val CHANNEL_ID = "gitmount_server"
+        private const val CHANNEL_SILENT_ID = "gitmount_server_silent"
         private const val NOTIF_ID = 1001
 
         const val ACTION_START = "com.kleinops.gitmount.action.START"
@@ -76,6 +77,10 @@ class MountService : Service() {
     private var startJob: Job? = null
     private lateinit var settingsRepo: SettingsRepository
 
+    /** true = 隐藏前台服务常驻通知（用静默渠道），启动后从设置读取 */
+    @Volatile
+    private var hiddenNotification = false
+
     override fun onCreate() {
         super.onCreate()
         settingsRepo = SettingsRepository(applicationContext)
@@ -87,7 +92,7 @@ class MountService : Service() {
             ACTION_STOP -> {
                 // 若本服务是通过 startForegroundService 拉起的，必须先 startForeground
                 // 才能安全退出，否则系统会抛 "did not then call Service.startForeground()"。
-                startForeground(NOTIF_ID, buildNotification(getString(R.string.notif_stopped), null))
+                startForeground(NOTIF_ID, buildNotification(getString(R.string.notif_stopped), null, hiddenNotification))
                 shutdownServers()
                 stopSelf()
                 return START_NOT_STICKY
@@ -126,7 +131,7 @@ class MountService : Service() {
             return
         }
         ServerController.update { it.copy(starting = true, error = null) }
-        startForeground(NOTIF_ID, buildNotification(getString(R.string.notif_starting), null))
+        startForeground(NOTIF_ID, buildNotification(getString(R.string.notif_starting), null, hiddenNotification))
 
         startJob?.cancel()
         startJob = scope.launch {
@@ -138,6 +143,7 @@ class MountService : Service() {
                 if (settings.username.isBlank() || settings.password.isBlank()) {
                     throw IllegalStateException("请先设置访问用用户名与密码")
                 }
+                hiddenNotification = settings.hideNotification
 
                 val client = GitHubClient(settings.token)
                 val repo = GitRepository(client, settings.owner, settings.repoName, settings.branch)
@@ -244,6 +250,7 @@ class MountService : Service() {
 
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = getSystemService(NotificationManager::class.java)
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 getString(R.string.channel_server_name),
@@ -252,12 +259,24 @@ class MountService : Service() {
                 description = getString(R.string.channel_server_desc)
                 setShowBadge(false)
             }
-            val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(channel)
+
+            // 静默渠道：隐藏通知时使用（Android 8+ 最低优先级，不响铃不震动、不常驻状态栏）
+            val silent = NotificationChannel(
+                CHANNEL_SILENT_ID,
+                getString(R.string.channel_silent_name),
+                NotificationManager.IMPORTANCE_MIN,
+            ).apply {
+                description = getString(R.string.channel_silent_desc)
+                setShowBadge(false)
+                enableVibration(false)
+                setSound(null, null)
+            }
+            manager.createNotificationChannel(silent)
         }
     }
 
-    private fun buildNotification(title: String, content: String?): Notification {
+    private fun buildNotification(title: String, content: String?, hidden: Boolean): Notification {
         val openIntent = PendingIntent.getActivity(
             this,
             0,
@@ -274,20 +293,26 @@ class MountService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
 
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        // 隐藏通知：用静默渠道，标题内容简化（前台服务通知系统强制存在，但用 MIN 渠道几乎不可见）
+        val builder = if (hidden) {
+            NotificationCompat.Builder(this, CHANNEL_SILENT_ID)
+        } else {
+            NotificationCompat.Builder(this, CHANNEL_ID)
+        }
+        return builder
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(title)
-            .setContentText(content)
+            .setContentTitle(if (hidden) getString(R.string.app_name) else title)
+            .setContentText(if (hidden) null else content)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(openIntent)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setPriority(if (hidden) NotificationCompat.PRIORITY_MIN else NotificationCompat.PRIORITY_LOW)
             .addAction(0, getString(R.string.notif_action_stop), stopIntent)
             .build()
     }
 
     private fun updateNotification(title: String, content: String?) {
         val manager = getSystemService(NotificationManager::class.java)
-        manager.notify(NOTIF_ID, buildNotification(title, content))
+        manager.notify(NOTIF_ID, buildNotification(title, content, hiddenNotification))
     }
 }

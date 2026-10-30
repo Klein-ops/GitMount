@@ -3,6 +3,8 @@ package com.kleinops.gitmount.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -57,6 +59,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -448,6 +451,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
             initialUsername = settings.username,
             initialPassword = settings.password,
             initialLoopbackOnly = settings.loopbackOnly,
+            initialHideNotification = settings.hideNotification,
             onDismiss = { showServerSetup = false },
         )
     }
@@ -732,6 +736,7 @@ private fun ServerSetupDialog(
     initialUsername: String,
     initialPassword: String,
     initialLoopbackOnly: Boolean,
+    initialHideNotification: Boolean,
     onDismiss: () -> Unit,
 ) {
     var mode by remember { mutableStateOf(initialMode) }
@@ -740,8 +745,10 @@ private fun ServerSetupDialog(
     var username by remember { mutableStateOf(initialUsername) }
     var password by remember { mutableStateOf(initialPassword) }
     var loopbackOnly by remember { mutableStateOf(initialLoopbackOnly) }
+    var hideNotification by remember { mutableStateOf(initialHideNotification) }
     var showPassword by remember { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
+    val context = LocalContext.current
 
     AlertDialog(
         onDismissRequest = { if (!saving) onDismiss() },
@@ -832,6 +839,56 @@ private fun ServerSetupDialog(
                         onCheckedChange = { loopbackOnly = it },
                     )
                 }
+
+                // 后台运行：隐藏常驻通知 + 电池优化白名单引导
+                Spacer(Modifier.height(4.dp))
+                Text("后台运行", style = MaterialTheme.typography.labelLarge)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(stringResource(R.string.settings_bg_hide_notif), style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            stringResource(R.string.settings_bg_hide_notif_desc),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = hideNotification,
+                        onCheckedChange = { hideNotification = it },
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(stringResource(R.string.settings_bg_battery), style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            stringResource(R.string.settings_bg_battery_desc),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    TextButton(
+                        onClick = {
+                            runCatching {
+                                context.startActivity(
+                                    Intent(
+                                        Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS,
+                                        android.net.Uri.parse("package:${context.packageName}"),
+                                    )
+                                )
+                            }
+                        },
+                    ) {
+                        Text(stringResource(R.string.settings_bg_battery_btn))
+                    }
+                }
             }
         },
         confirmButton = {
@@ -846,6 +903,7 @@ private fun ServerSetupDialog(
                         username = username.trim(),
                         password = password,
                         loopbackOnly = loopbackOnly,
+                        hideNotification = hideNotification,
                     )
                     onDismiss()
                 },
