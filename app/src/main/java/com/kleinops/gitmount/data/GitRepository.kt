@@ -1,5 +1,6 @@
 package com.kleinops.gitmount.data
 
+import com.kleinops.gitmount.service.LogBus
 import java.io.FileNotFoundException
 import java.io.IOException
 import java.text.SimpleDateFormat
@@ -34,14 +35,31 @@ class GitRepository(
 
     companion object {
         const val KEEP_FILE = ".gitkeep"
-        private const val CACHE_TTL_MS = 4_000L
-        /** Contents API 单文件上限；超过则明确拒绝，避免请求被 GitHub 打断 */
-        const val MAX_FILE_SIZE = 95L * 1024 * 1024
+
+        /** 目录列表缓存有效期：30s（文件管理器反复刷新列表是配额消耗大头） */
+        private const val CACHE_TTL_MS = 30_000L
+
+        /**
+         * 单文件上限：GitHub Contents API 限制为 100MB（解码后）。
+         * 本地先拦截，避免把超大文件发到 GitHub 再被拒绝。
+         */
+        const val MAX_FILE_SIZE = 100L * 1024 * 1024
+
+        /** 文件内容缓存仅用于 ≤1MB 的小文件 */
+        private const val FILE_CACHE_TTL_MS = 60_000L
+        private const val FILE_CACHE_MAX_ENTRIES = 64
+        private const val FILE_CACHE_MAX_BYTES = 24L * 1024 * 1024
     }
 
     private class CacheEntry(val nodes: List<VfsNode>, val at: Long)
 
+    private class FileCacheEntry(val sha: String, val bytes: ByteArray, val at: Long)
+
     private val dirCache = ConcurrentHashMap<String, CacheEntry>()
+    private val fileCache = ConcurrentHashMap<String, FileCacheEntry>()
+
+    /** 文件缓存总字节数（写入时累加、清空时归零，用于限制内存占用） */
+    private val fileCacheBytes = java.util.concurrent.atomic.AtomicLong(0)
 
     /**
      * 规范化路径：把 ".." 与 "." 真正折叠掉，而不是直接拒绝。
@@ -77,7 +95,32 @@ class GitRepository(
         if (normalized == "/") "/" else normalized.substringAfterLast('/')
 
     fun invalidate(path: String? = null) {
-        if (path == null) dirCache.clear() else dirCache.remove(normalize(path))
+        if (path == null) {
+            dirCache.clear()
+            fileCache.clear()
+            fileCacheBytes.set(0)
+        } else {
+            dirCache.remove(normalize(path))
+            evictFile(normalize(path))
+        }
+    }
+
+    /** 按内部路径移除文件内容缓存（同时扣减字节计数） */
+    private fun evictFile(norm: String) {
+        fileCache.remove(norm)?.let { fileCacheBytes.addAndGet(-it.bytes.size) }
+    }
+
+    /** 写入文件内容缓存（只缓存 ≤1MB 小文件；超出条目或字节上限时整体清空，简单可靠） */
+    private fun putFileCache(norm: String, sha: String, bytes: ByteArray) {
+        if (sha.isBlank() || bytes.isEmpty() || bytes.size > 1024 * 1024) return
+        if (fileCache.size >= FILE_CACHE_MAX_ENTRIES ||
+            fileCacheBytes.get() + bytes.size > FILE_CACHE_MAX_BYTES
+        ) {
+            fileCache.clear()
+            fileCacheBytes.set(0)
+        }
+        fileCache[norm] = FileCacheEntry(sha, bytes, System.currentTimeMillis())
+        fileCacheBytes.addAndGet(bytes.size.toLong())
     }
 
     /** 列目录（带 TTL 缓存） */
@@ -125,34 +168,44 @@ class GitRepository(
             return null
         }
         siblings.firstOrNull { it.name == name }?.let { return it }
-        // 列表里没有，再尝试直接取文件元信息（目录会返回 null）
-        return try {
-            val meta = client.getFileMeta(owner, repo, toGitPath(norm), branch) ?: return null
-            VfsNode(name, norm, false, meta.size, meta.sha)
-        } catch (e: IOException) {
-            null
-        }
+        // 父目录列表是 Contents API 的权威结果：列表里没有即为不存在。
+        // 不再额外调 getFileMeta 兜底——所有写操作都会失效父目录缓存，30s TTL 内列表必然最新；
+        // 删掉这步可显著降低配额消耗（文件管理器会对每个文件高频 stat）。
+        return null
     }
 
     fun exists(path: String): Boolean = stat(path) != null
 
     fun isDirectory(path: String): Boolean = stat(path)?.isDirectory == true
 
-    /** 读取文件字节 */
+    /** 读取文件字节（带内容缓存：sha 是内容哈希，命中即内容一致，安全） */
     fun read(path: String): ByteArray {
         val norm = normalize(path)
         if (norm == "/") throw IOException("不能读取目录")
         return try {
-            client.getFile(owner, repo, toGitPath(norm), branch).first
+            val cached = fileCache[norm]
+            if (cached != null && System.currentTimeMillis() - cached.at < FILE_CACHE_TTL_MS) {
+                return cached.bytes
+            }
+            val (bytes, meta) = client.getFile(owner, repo, toGitPath(norm), branch)
+            putFileCache(norm, meta.sha, bytes)
+            bytes
         } catch (e: GitHubApiException) {
             if (e.code == 404) throw FileNotFoundException("文件不存在：$norm") else throw e
         }
     }
 
-    /** 读取文件并同时拿到 sha（上传前做乐观锁用） */
+    /** 读取文件并同时拿到 sha（上传前做乐观锁用；内容同样走缓存） */
     fun readWithMeta(path: String): Pair<ByteArray, FileMeta> {
         val norm = normalize(path)
-        return client.getFile(owner, repo, toGitPath(norm), branch)
+        if (norm == "/") throw IOException("不能读取目录")
+        val cached = fileCache[norm]
+        if (cached != null && System.currentTimeMillis() - cached.at < FILE_CACHE_TTL_MS) {
+            return cached.bytes to FileMeta(cached.sha, cached.bytes.size.toLong())
+        }
+        val (bytes, meta) = client.getFile(owner, repo, toGitPath(norm), branch)
+        putFileCache(norm, meta.sha, bytes)
+        return bytes to meta
     }
 
     /**
@@ -304,6 +357,32 @@ class GitRepository(
             val data = read(from)
             write(to, data, "复制 ${node.name}")
         }
+    }
+
+    /** 查询仓库容量信息（size 包含提交历史，单位 KB；私有仓库配额 500MB） */
+    fun repoInfo(): RepoInfo? = client.getRepoInfo(owner, repo)
+
+    /**
+     * 清空提交历史（孤儿提交重写，**文件全部保留**）。
+     *
+     * 原理：保留当前分支最新 commit 的 tree（即全部文件的目录索引），
+     * 创建一个无父提交（parents=[]）指向同一棵树，再把分支强制移动到该提交。
+     * 效果：文件一个不少，历史从 N 个 commit 变成 1 个；旧 commit 变为不可达对象，
+     * 由 GitHub 后台 GC 回收，容量数字会延迟下降（几小时~几天不等）。
+     *
+     * 只需 3 次 API 调用，不备份、不重传文件。
+     */
+    fun clearHistory(commitMessage: String = "初始化（历史已清空）") {
+        // 1) 读 HEAD commit 与其根 tree（一次调用）
+        val (_, treeSha) = client.getHeadTree(owner, repo, branch)
+        if (treeSha.isBlank()) throw IOException("无法获取仓库文件树")
+        // 2) 创建孤儿提交（无父提交，复用 tree → 文件保留）
+        val newCommit = client.createOrphanCommit(owner, repo, treeSha, commitMessage)
+        // 3) 强制移动分支引用到新提交（旧历史不可达）
+        client.updateBranchRef(owner, repo, branch, newCommit)
+        // 本会话缓存全部失效（sha 全变了）
+        invalidate()
+        LogBus.info("历史已清空：$owner/$repo 分支 $branch 现有 ${newCommit.take(7)}")
     }
 
     /** 仓库总配额参考（GitHub 建议单仓库 < 1GB） */

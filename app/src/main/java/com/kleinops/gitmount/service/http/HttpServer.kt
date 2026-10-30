@@ -13,12 +13,17 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
+/** 请求体超过上限（在读取 body 前抛出，由服务器层转 413） */
+class RequestTooLargeException(val limit: Long) : IOException("请求体超过 ${limit / 1024 / 1024}MB 上限")
+
 /** 极简 HTTP/1.1 服务器：单线程池 + 逐请求分发，专为 DAV 客户端（文件管理器）设计 */
 class HttpServer(
     private val port: Int,
     private val handler: (HttpExchange) -> Unit,
     /** 绑定地址；null/0.0.0.0 = 监听所有网卡（局域网），127.0.0.1 = 仅本机 */
     private val bindAddress: String? = null,
+    /** 请求体上限：超过时在读 body 之前直接回 413，避免超大上传白白占用内存/带宽 */
+    private val maxBodyBytes: Long = 100L * 1024 * 1024,
 ) {
     private val serverSocket = if (bindAddress == null) {
         ServerSocket(port)
@@ -65,6 +70,17 @@ class HttpServer(
                 while (keepAlive && running.get() && !socket.isClosed) {
                     val exchange = try {
                         parseRequest(input)
+                    } catch (e: RequestTooLargeException) {
+                        // 超大上传：回 413 再断开，让客户端立刻知道被拒绝
+                        try {
+                            val err = HttpExchange("GET", "/", emptyMap(), ByteArray(0), false)
+                            err.status = 413
+                            err.bodyBytes = ("请求体超过 ${e.limit / 1024 / 1024}MB 上限").toByteArray()
+                            err.writeTo(output)
+                            output.flush()
+                        } catch (_: IOException) {
+                        }
+                        break
                     } catch (e: IOException) {
                         break
                     } ?: break
@@ -112,13 +128,20 @@ class HttpServer(
             }
         }
 
-        val cl = headers["content-length"]?.toIntOrNull() ?: 0
+        val cl = headers["content-length"]?.toLongOrNull() ?: 0L
+        // 关键：在【读取 body 之前】就拦截超大上传。
+        // 超大文件本来就会被 GitRepository.MAX_FILE_SIZE 拒绝，提前在这里挡掉，
+        // 可以完全避免把百 MB 的字节读进内存、也绝不触发 GitHub API 调用。
+        if (cl > maxBodyBytes) {
+            throw RequestTooLargeException(maxBodyBytes)
+        }
         val body = if (cl > 0) {
-            val bytes = ByteArrayOutputStream(cl)
+            // 已通过上限检查（cl <= 100MB < Int.MAX_VALUE），toInt() 安全
+            val bytes = ByteArrayOutputStream(cl.toInt())
             val buf = ByteArray(8192)
             var remaining = cl
             while (remaining > 0) {
-                val n = input.read(buf, 0, minOf(buf.size, remaining))
+                val n = input.read(buf, 0, minOf(buf.size.toLong(), remaining).toInt())
                 if (n < 0) throw IOException("eof in body")
                 bytes.write(buf, 0, n)
                 remaining -= n

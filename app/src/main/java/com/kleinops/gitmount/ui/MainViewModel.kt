@@ -6,12 +6,15 @@ import androidx.lifecycle.viewModelScope
 import com.kleinops.gitmount.data.AppSettings
 import com.kleinops.gitmount.data.GitHubApiException
 import com.kleinops.gitmount.data.GitHubClient
+import com.kleinops.gitmount.data.GitRepository
 import com.kleinops.gitmount.data.LogEntry
 import com.kleinops.gitmount.data.RepoBrief
+import com.kleinops.gitmount.data.RepoInfo
 import com.kleinops.gitmount.data.ServerMode
 import com.kleinops.gitmount.data.SettingsRepository
 import com.kleinops.gitmount.service.LogBus
 import com.kleinops.gitmount.service.ServerController
+import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -35,6 +38,15 @@ sealed interface ScanState {
     data class Error(val message: String) : ScanState
 }
 
+/** 仓库容量/历史清理状态 */
+sealed interface RepoOpState {
+    data object Idle : RepoOpState
+    data object Loading : RepoOpState
+    data object ClearingHistory : RepoOpState
+    data class Success(val info: RepoInfo) : RepoOpState
+    data class Error(val message: String) : RepoOpState
+}
+
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val settingsRepo = SettingsRepository(app)
@@ -50,6 +62,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _scanState = MutableStateFlow<ScanState>(ScanState.Idle)
     val scanState: StateFlow<ScanState> = _scanState
+
+    private val _repoOpState = MutableStateFlow<RepoOpState>(RepoOpState.Idle)
+    val repoOpState: StateFlow<RepoOpState> = _repoOpState
+
+    /** 扫描仓库结果缓存：同一 token 5 分钟内不重复请求（避免反复开关对话框打爆配额） */
+    private data class ScanCache(val token: String, val login: String, val repos: List<RepoBrief>, val at: Long)
+    private var scanCache: ScanCache? = null
+    private val SCAN_CACHE_TTL_MS = 5L * 60 * 1000
+
+    fun clearRepoOpState() {
+        _repoOpState.value = RepoOpState.Idle
+    }
 
     private val _testing = MutableStateFlow(false)
     val testing: StateFlow<Boolean> = _testing
@@ -78,6 +102,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             _scanState.value = ScanState.Error("请填写 GitHub 访问令牌")
             return
         }
+        // 同一 token 5 分钟内直接复用上次扫描结果，避免反复开关对话框打爆配额
+        scanCache?.takeIf {
+            it.token == t && System.currentTimeMillis() - it.at < SCAN_CACHE_TTL_MS
+        }?.let {
+            _scanState.value = ScanState.Success(it.login, it.repos)
+            return
+        }
         _scanState.value = ScanState.Working
         // OkHttp 同步调用必须在 IO 线程执行，避免 NetworkOnMainThreadException
         viewModelScope.launch(Dispatchers.IO) {
@@ -87,11 +118,55 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (login.isBlank()) throw IllegalStateException("令牌无效")
                 LogBus.info("Token 校验通过，账号 $login")
                 val repos = client.listUserRepos()
+                scanCache = ScanCache(t, login, repos, System.currentTimeMillis())
                 _scanState.value = ScanState.Success(login, repos)
             } catch (e: Exception) {
                 val msg = friendly(e)
                 LogBus.error("扫描仓库失败：$msg")
                 _scanState.value = ScanState.Error(msg)
+            }
+        }
+    }
+
+    /** 查询仓库容量信息（size 包含提交历史；私有仓库配额 500MB） */
+    fun loadRepoInfo() {
+        val s = settings.value
+        if (s.token.isBlank() || s.owner.isBlank() || s.repoName.isBlank()) {
+            _repoOpState.value = RepoOpState.Error("尚未配置仓库")
+            return
+        }
+        _repoOpState.value = RepoOpState.Loading
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val info = GitHubClient(s.token).getRepoInfo(s.owner, s.repoName)
+                    ?: throw IOException("仓库不存在或无权访问")
+                _repoOpState.value = RepoOpState.Success(info)
+            } catch (e: Exception) {
+                _repoOpState.value = RepoOpState.Error(friendly(e))
+            }
+        }
+    }
+
+    /**
+     * 清空提交历史（孤儿提交重写：文件全部保留，历史从 N 个 commit 变成 1 个）。
+     * 容量数字由 GitHub 后台 GC 延迟回收，不会立即下降。
+     */
+    fun clearRepoHistory() {
+        val s = settings.value
+        if (s.token.isBlank() || s.owner.isBlank() || s.repoName.isBlank()) {
+            _repoOpState.value = RepoOpState.Error("尚未配置仓库")
+            return
+        }
+        _repoOpState.value = RepoOpState.ClearingHistory
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val repo = GitRepository(GitHubClient(s.token), s.owner, s.repoName, s.branch)
+                repo.clearHistory()
+                // 清完历史立即重新拉取容量（此时 size 可能仍含旧的不可达对象，如实展示）
+                val info = GitHubClient(s.token).getRepoInfo(s.owner, s.repoName)
+                _repoOpState.value = if (info != null) RepoOpState.Success(info) else RepoOpState.Error("历史已清空，但容量信息暂时不可用")
+            } catch (e: Exception) {
+                _repoOpState.value = RepoOpState.Error(friendly(e))
             }
         }
     }

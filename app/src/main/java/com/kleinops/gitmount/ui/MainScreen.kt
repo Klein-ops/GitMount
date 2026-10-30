@@ -30,6 +30,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -83,9 +84,16 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
     val logs by vm.logs.collectAsStateWithLifecycle()
     val setupState by vm.setupState.collectAsStateWithLifecycle()
     val scanState by vm.scanState.collectAsStateWithLifecycle()
+    val repoOpState by vm.repoOpState.collectAsStateWithLifecycle()
 
     var showRepoSetup by remember { mutableStateOf(false) }
     var showServerSetup by remember { mutableStateOf(false) }
+    var showClearHistoryConfirm by remember { mutableStateOf(false) }
+
+    // 已配置仓库时，进入主界面自动查一次容量（后续可手动刷新）
+    LaunchedEffect(settings.isConfigured) {
+        if (settings.isConfigured) vm.loadRepoInfo()
+    }
 
     // 初始化成功：关闭仓库对话框并用 Snackbar 提示。
     // 初始化失败不在此处理——错误会直接显示在配置对话框内部，
@@ -273,13 +281,83 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                 }
             }
 
-            // 仓库信息
+            // 仓库信息 + 容量
             item {
                 SectionCard(title = "仓库") {
                     if (settings.isConfigured) {
                         InfoRow("仓库", "${settings.owner}/${settings.repoName}", mono = true)
                         InfoRow("分支", settings.branch, mono = true)
                         InfoRow("令牌", "已加密保存于系统密钥库")
+                        Spacer(Modifier.height(10.dp))
+
+                        // ---- 容量展示 ----
+                        when (val op = repoOpState) {
+                            is RepoOpState.Loading -> Row(verticalAlignment = Alignment.CenterVertically) {
+                                CircularProgressIndicator(modifier = Modifier.width(16.dp), strokeWidth = 2.dp)
+                                Spacer(Modifier.width(8.dp))
+                                Text("正在查询容量…", style = MaterialTheme.typography.bodySmall)
+                            }
+                            is RepoOpState.Error -> Text(
+                                "容量查询失败：${op.message}",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            is RepoOpState.ClearingHistory -> Row(verticalAlignment = Alignment.CenterVertically) {
+                                CircularProgressIndicator(modifier = Modifier.width(16.dp), strokeWidth = 2.dp)
+                                Spacer(Modifier.width(8.dp))
+                                Text("正在清空提交历史…", style = MaterialTheme.typography.bodySmall)
+                            }
+                            is RepoOpState.Success -> {
+                                val info = op.info
+                                // 本地写入时直接在用后查询，命中缓存避免重复调用
+                                InfoRow("已用容量", info.usedHuman, mono = true)
+                                InfoRow("剩余容量", info.remainingHuman, mono = true)
+                                InfoRow(
+                                    "占用比例",
+                                    "${info.percentUsed}% / 500MB",
+                                    mono = true,
+                                    valueColor = if (info.percentUsed >= 90) MaterialTheme.colorScheme.error
+                                    else MaterialTheme.colorScheme.primary,
+                                )
+                                Spacer(Modifier.height(6.dp))
+                                LinearProgressIndicator(
+                                    progress = { info.percentUsed / 100f },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                                if (info.exceeded) {
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        "已超出仓库容量上限！请清理文件或清空提交历史。",
+                                        color = MaterialTheme.colorScheme.error,
+                                        style = MaterialTheme.typography.labelSmall,
+                                    )
+                                }
+                            }
+                            RepoOpState.Idle -> Unit
+                        }
+
+                        Spacer(Modifier.height(10.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                onClick = { vm.loadRepoInfo() },
+                                enabled = repoOpState !is RepoOpState.Loading &&
+                                    repoOpState !is RepoOpState.ClearingHistory,
+                            ) {
+                                Text("刷新容量")
+                            }
+                            OutlinedButton(
+                                onClick = { showClearHistoryConfirm = true },
+                                enabled = repoOpState !is RepoOpState.ClearingHistory,
+                            ) {
+                                if (repoOpState is RepoOpState.ClearingHistory) {
+                                    CircularProgressIndicator(modifier = Modifier.width(14.dp), strokeWidth = 2.dp)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("清空中…")
+                                } else {
+                                    Text("清空提交历史")
+                                }
+                            }
+                        }
                     } else {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
@@ -356,6 +434,47 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
             initialPassword = settings.password,
             initialLoopbackOnly = settings.loopbackOnly,
             onDismiss = { showServerSetup = false },
+        )
+    }
+
+    // 清空历史完成/失败提示（检测 ClearingHistory → Success/Error 的状态跳变）
+    val prevRepoOp = remember { mutableStateOf<RepoOpState>(RepoOpState.Idle) }
+    LaunchedEffect(repoOpState) {
+        val prev = prevRepoOp.value
+        if (prev is RepoOpState.ClearingHistory && repoOpState is RepoOpState.Success) {
+            snackbar.showSnackbar("提交历史已清空：文件全部保留，容量将由 GitHub 后台回收后下降")
+        } else if (prev is RepoOpState.ClearingHistory && repoOpState is RepoOpState.Error) {
+            snackbar.showSnackbar("清空失败：${(repoOpState as RepoOpState.Error).message}")
+        }
+        prevRepoOp.value = repoOpState
+    }
+
+    // 清空历史强确认对话框（明确说明文件保留、容量延迟回收、不可撤销）
+    if (showClearHistoryConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearHistoryConfirm = false },
+            title = { Text("清空提交历史？") },
+            text = {
+                Text(
+                    "将把当前分支的历史重写为单个提交（孤儿提交重写）。\n\n" +
+                        "• 仓库内所有文件都会保留，不会丢失\n" +
+                        "• 提交历史将变成 1 条，旧历史变为不可达对象\n" +
+                        "• GitHub 后台回收旧对象需要时间，容量数字可能延迟下降（几小时~几天）\n\n" +
+                        "此操作不可撤销，确定继续？",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showClearHistoryConfirm = false
+                        vm.clearRepoHistory()
+                    },
+                ) { Text("确定清空") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearHistoryConfirm = false }) { Text("取消") }
+            },
         )
     }
 }

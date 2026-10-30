@@ -3,7 +3,9 @@ package com.kleinops.gitmount.service
 import com.kleinops.gitmount.data.GitRepository
 import com.kleinops.gitmount.data.VfsNode
 import java.io.BufferedReader
+import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.io.InputStreamReader
 import java.io.OutputStream
 import java.net.InetAddress
@@ -496,7 +498,14 @@ class FtpServer(
             reply(150, "请发送数据")
             val dataSocket = openDataSocket() ?: return
             try {
-                val incoming = dataSocket.getInputStream().readBytes()
+                // 流式接收：边收边数，超过 100MB 上限立即中断并回 552。
+                // 绝不把超大文件读进内存，也不触发任何 GitHub API 调用。
+                val incoming = readLimited(dataSocket.getInputStream(), GitRepository.MAX_FILE_SIZE)
+                    ?: run {
+                        dataSocket.close()
+                        reply(552, "文件超过 ${GitRepository.MAX_FILE_SIZE / 1024 / 1024}MB 上限")
+                        return
+                    }
                 val finalBytes = if (append && repo.exists(path)) {
                     repo.read(path) + incoming
                 } else {
@@ -512,6 +521,25 @@ class FtpServer(
                 }
                 reply(550, "写入失败：${e.message}")
             }
+        }
+
+        /** 流式读取数据连接，最多读 limit 字节；超过则返回 null（由调用方中断并回 552） */
+        private fun readLimited(input: InputStream, limit: Long): ByteArray? {
+            val buf = ByteArray(8192)
+            val out = ByteArrayOutputStream(limit.coerceAtMost(8192L).toInt())
+            var total = 0L
+            while (true) {
+                val n = try {
+                    input.read(buf)
+                } catch (e: IOException) {
+                    return out.toByteArray()
+                }
+                if (n < 0) break
+                total += n
+                if (total > limit) return null
+                out.write(buf, 0, n)
+            }
+            return out.toByteArray()
         }
 
         private fun doDelete(arg: String) {

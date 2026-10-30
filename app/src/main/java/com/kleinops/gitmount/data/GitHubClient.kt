@@ -28,6 +28,42 @@ data class RepoBrief(
 )
 
 /**
+ * 仓库容量信息。
+ * GitHub 的 size 单位为 KB，且**包含全部提交历史**占用的空间；
+ * 私有仓库免费额度为 500MB（GitHub 文档口径 1GB 是包含公有仓库的旧口径）。
+ */
+data class RepoInfo(
+    val owner: String,
+    val repo: String,
+    val sizeKb: Long,
+    val defaultBranch: String,
+) {
+    /** 私有仓库容量上限：500MB = 512000 KB */
+    val quotaKb: Long get() = 500L * 1024
+
+    val usedKb: Long get() = sizeKb
+
+    val remainingKb: Long get() = (quotaKb - sizeKb).coerceAtLeast(0)
+
+    val percentUsed: Int
+        get() = ((sizeKb.toDouble() / quotaKb) * 100).toInt().coerceIn(0, 100)
+
+    val exceeded: Boolean get() = sizeKb > quotaKb
+
+    /** 人类可读的已用容量（保留 1 位小数） */
+    val usedHuman: String get() = formatKb(sizeKb)
+
+    /** 人类可读的剩余容量 */
+    val remainingHuman: String get() = formatKb(remainingKb)
+
+    private fun formatKb(kb: Long): String = when {
+        kb >= 1024 * 1024 -> String.format(java.util.Locale.US, "%.1f GB", kb / 1024.0 / 1024.0)
+        kb >= 1024 -> String.format(java.util.Locale.US, "%.1f MB", kb / 1024.0)
+        else -> "$kb KB"
+    }
+}
+
+/**
  * GitHub REST API 客户端。
  * 覆盖本应用需要的全部操作：校验 token、创建私有仓库、列目录、读写删文件、目录建占位文件。
  * 全部使用同步调用，由调用方调度到 IO 线程。
@@ -104,6 +140,70 @@ class GitHubClient(private val token: String) {
         } catch (e: GitHubApiException) {
             if (e.code == 404) null else throw e
         }
+    }
+
+    /**
+     * 查询仓库容量信息（size 单位为 KB，包含提交历史）。
+     * 私有仓库免费额度 500MB；超限后写入会失败，需要清理历史或扩容。
+     */
+    fun getRepoInfo(owner: String, repo: String): RepoInfo? {
+        return try {
+            val body = execute(authRequest(url("/repos/$owner/$repo")).get())
+            val o = JSONObject(body)
+            RepoInfo(
+                owner = owner,
+                repo = repo,
+                sizeKb = o.optLong("size"),
+                defaultBranch = o.optString("default_branch").ifBlank { "main" },
+            )
+        } catch (e: GitHubApiException) {
+            if (e.code == 404) null else throw e
+        }
+    }
+
+    /**
+     * 获取分支最新 commit 的 sha 及其根 tree 的 sha（一次调用）。
+     * tree 是当前仓库全部文件的目录结构索引，blob 对象仍被它引用，
+     * 因此用它重建孤儿提交可以做到“全部文件保留、历史清空”。
+     */
+    fun getHeadTree(owner: String, repo: String, branch: String): Pair<String, String> {
+        val body = execute(authRequest(url("/repos/$owner/$repo/git/commits/$branch")).get())
+        val o = JSONObject(body)
+        val commitSha = o.optString("sha")
+        val treeSha = o.optJSONObject("tree")?.optString("sha").orEmpty()
+        if (commitSha.isBlank() || treeSha.isBlank()) {
+            throw GitHubApiException(502, "无法解析仓库提交信息")
+        }
+        return commitSha to treeSha
+    }
+
+    /**
+     * 创建孤儿提交（无父提交，parents 为空数组），复用传入的 tree sha。
+     * @return 新 commit 的 sha
+     */
+    fun createOrphanCommit(owner: String, repo: String, treeSha: String, message: String): String {
+        val payload = JSONObject()
+            .put("message", message)
+            .put("tree", treeSha)
+            .put("parents", JSONArray()) // 关键：空 parents = 孤儿提交，与历史彻底断开
+        val body = execute(
+            authRequest(url("/repos/$owner/$repo/git/commits"))
+                .post(payload.toString().toRequestBody(jsonMedia))
+        )
+        val sha = JSONObject(body).optString("sha")
+        if (sha.isBlank()) throw GitHubApiException(502, "创建提交失败")
+        return sha
+    }
+
+    /** 强制移动分支引用到指定 commit（把默认分支指向孤儿提交，旧历史随即不可达） */
+    fun updateBranchRef(owner: String, repo: String, branch: String, commitSha: String) {
+        val payload = JSONObject()
+            .put("sha", commitSha)
+            .put("force", true)
+        execute(
+            authRequest(url("/repos/$owner/$repo/git/refs/heads/$branch"))
+                .patch(payload.toString().toRequestBody(jsonMedia))
+        )
     }
 
     /**
