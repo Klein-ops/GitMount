@@ -17,8 +17,17 @@ import java.util.concurrent.atomic.AtomicBoolean
 class HttpServer(
     private val port: Int,
     private val handler: (HttpExchange) -> Unit,
+    /** 绑定地址；null/0.0.0.0 = 监听所有网卡（局域网），127.0.0.1 = 仅本机 */
+    private val bindAddress: String? = null,
 ) {
-    private val serverSocket = ServerSocket(port)
+    private val serverSocket = if (bindAddress == null) {
+        ServerSocket(port)
+    } else {
+        ServerSocket().apply {
+            reuseAddress = true
+            bind(java.net.InetSocketAddress(bindAddress, port))
+        }
+    }
     private val running = AtomicBoolean(true)
     private val pool = Executors.newCachedThreadPool { r ->
         Thread(r, "dav-http").apply { isDaemon = true }

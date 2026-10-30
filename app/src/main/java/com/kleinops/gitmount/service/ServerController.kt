@@ -52,13 +52,23 @@ object ServerController {
         val username: String = "",
         val password: String = "",
         val error: String? = null,
+        /** true = 仅监听本机回环，不暴露局域网 */
+        val loopbackOnly: Boolean = false,
     ) {
-        /** 供文件管理器填写的完整地址 */
+        /** 局域网访问地址（仅非回环模式时存在） */
         val endpoint: String?
             get() = when {
-                !running || lanIp == null -> null
+                !running || lanIp == null || loopbackOnly -> null
                 mode == ServerMode.WEBDAV -> "http://$lanIp:$port/"
                 else -> "ftp://$lanIp:$port/"
+            }
+
+        /** 本机回环访问地址（loopback 模式下地址一致，仅 127.0.0.1） */
+        val loopbackEndpoint: String?
+            get() = when {
+                !running -> null
+                mode == ServerMode.WEBDAV -> "http://127.0.0.1:$port/"
+                else -> "ftp://127.0.0.1:$port/"
             }
     }
 

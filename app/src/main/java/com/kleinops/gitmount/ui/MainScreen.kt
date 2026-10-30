@@ -1,5 +1,8 @@
 package com.kleinops.gitmount.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -19,6 +22,8 @@ import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -34,6 +39,7 @@ import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -49,7 +55,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -58,6 +63,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.kleinops.gitmount.data.ServerMode
 import com.kleinops.gitmount.service.MountService
+import com.kleinops.gitmount.ui.components.ClickableInfoRow
 import com.kleinops.gitmount.ui.components.EmptyHint
 import com.kleinops.gitmount.ui.components.InfoRow
 import com.kleinops.gitmount.ui.components.LogRow
@@ -78,15 +84,16 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
     val setupState by vm.setupState.collectAsStateWithLifecycle()
     val scanState by vm.scanState.collectAsStateWithLifecycle()
 
-    var showSetup by remember { mutableStateOf(false) }
+    var showRepoSetup by remember { mutableStateOf(false) }
+    var showServerSetup by remember { mutableStateOf(false) }
 
-    // 初始化成功：关闭对话框并用 Snackbar 提示。
+    // 初始化成功：关闭仓库对话框并用 Snackbar 提示。
     // 初始化失败不在此处理——错误会直接显示在配置对话框内部，
     // 避免 AlertDialog 遮挡底部 Snackbar 导致用户看不到具体原因。
     LaunchedEffect(setupState) {
         if (setupState is SetupState.Success) {
             snackbar.showSnackbar((setupState as SetupState.Success).message)
-            showSetup = false
+            showRepoSetup = false
             vm.clearSetupMessage()
         }
     }
@@ -106,8 +113,8 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                     }
                 },
                 actions = {
-                    IconButton(onClick = { showSetup = true }) {
-                        Icon(Icons.Filled.Settings, contentDescription = "配置")
+                    IconButton(onClick = { showRepoSetup = true }) {
+                        Icon(Icons.Filled.Settings, contentDescription = "仓库配置")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -142,15 +149,45 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                             Text("正在启动…", style = MaterialTheme.typography.bodyMedium)
                         }
                     } else if (server.running) {
-                        val endpoint = server.endpoint ?: "未知地址"
-                        InfoRow("访问地址", endpoint, mono = true)
+                        // 复制到剪贴板的工具函数
+                        fun copyToClipboard(text: String, label: String) {
+                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            cm.setPrimaryClip(ClipData.newPlainText("GitMount 地址", text))
+                            scope.launch { snackbar.showSnackbar("$label 已复制到剪贴板") }
+                        }
+                        if (server.loopbackOnly) {
+                            // 仅本机模式：只展示回环地址
+                            ClickableInfoRow(
+                                label = "本机地址",
+                                value = server.loopbackEndpoint ?: "未知",
+                                mono = true,
+                                onClick = { server.loopbackEndpoint?.let { copyToClipboard(it, "本机地址") } },
+                            )
+                        } else {
+                            ClickableInfoRow(
+                                label = "局域网地址",
+                                value = server.endpoint ?: "未知",
+                                mono = true,
+                                onClick = { server.endpoint?.let { copyToClipboard(it, "局域网地址") } },
+                            )
+                            ClickableInfoRow(
+                                label = "本机地址",
+                                value = server.loopbackEndpoint ?: "未知",
+                                mono = true,
+                                onClick = { server.loopbackEndpoint?.let { copyToClipboard(it, "本机地址") } },
+                            )
+                        }
                         InfoRow("协议", server.mode.label)
                         InfoRow("端口", server.port.toString(), mono = true)
                         InfoRow("用户名", server.username, mono = true)
                         InfoRow("密码", "••••••", mono = true)
                         Spacer(Modifier.height(12.dp))
                         Text(
-                            "在同局域网的电脑/手机上添加该地址即可读写仓库文件。",
+                            if (server.loopbackOnly) {
+                                "当前仅本机可访问（只监听 127.0.0.1）。如需局域网访问，请在服务设置里关闭“仅本机访问”。"
+                            } else {
+                                "点击地址即可复制。局域网内其他设备用局域网地址访问；手机本机用 127.0.0.1 地址更稳定。"
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -184,7 +221,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                                         .getOrDefault(ServerMode.WEBDAV)
                                     if (!settings.isConfigured) {
                                         scope.launch { snackbar.showSnackbar("请先完成仓库配置") }
-                                        showSetup = true
+                                        showRepoSetup = true
                                     } else {
                                         MountService.start(context, mode, port)
                                     }
@@ -202,8 +239,11 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                                 Text("停止服务")
                             }
                         }
-                        FilledTonalButton(onClick = { showSetup = true }) {
-                            Text("配置")
+                        FilledTonalButton(onClick = { showRepoSetup = true }) {
+                            Text("仓库配置")
+                        }
+                        FilledTonalButton(onClick = { showServerSetup = true }) {
+                            Text("服务设置")
                         }
                     }
                 }
@@ -264,44 +304,47 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
         }
     }
 
-    if (showSetup) {
-        SetupDialog(
+    if (showRepoSetup) {
+        RepoSetupDialog(
             vm = vm,
-            initialMode = runCatching { ServerMode.valueOf(settings.mode) }.getOrDefault(ServerMode.WEBDAV),
             initialToken = settings.token,
             initialOwner = settings.owner,
             initialRepo = settings.repoName,
             initialBranch = settings.branch,
-            initialFtpPort = settings.ftpPort.toString(),
-            initialWebdavPort = settings.webdavPort.toString(),
-            initialUsername = settings.username,
-            initialPassword = settings.password,
             isWorking = setupState is SetupState.Working,
             scanState = scanState,
             setupState = setupState,
             onDismiss = {
-                showSetup = false
+                showRepoSetup = false
                 vm.clearSetupMessage()
                 vm.clearScanState()
             },
         )
     }
+
+    if (showServerSetup) {
+        ServerSetupDialog(
+            vm = vm,
+            initialMode = runCatching { ServerMode.valueOf(settings.mode) }.getOrDefault(ServerMode.WEBDAV),
+            initialFtpPort = settings.ftpPort.toString(),
+            initialWebdavPort = settings.webdavPort.toString(),
+            initialUsername = settings.username,
+            initialPassword = settings.password,
+            initialLoopbackOnly = settings.loopbackOnly,
+            onDismiss = { showServerSetup = false },
+        )
+    }
 }
 
-/** 配置对话框：令牌 → 扫描仓库 → 绑定已有 / 创建新仓库 + 服务设置 */
+/** 仓库配置对话框：令牌 → 扫描仓库 → 绑定已有 / 创建新仓库 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SetupDialog(
+private fun RepoSetupDialog(
     vm: MainViewModel,
-    initialMode: ServerMode,
     initialToken: String,
     initialOwner: String,
     initialRepo: String,
     initialBranch: String,
-    initialFtpPort: String,
-    initialWebdavPort: String,
-    initialUsername: String,
-    initialPassword: String,
     isWorking: Boolean,
     scanState: ScanState,
     setupState: SetupState,
@@ -311,12 +354,7 @@ private fun SetupDialog(
     var owner by remember { mutableStateOf(initialOwner) }
     var repo by remember { mutableStateOf(initialRepo) }
     var branch by remember { mutableStateOf(initialBranch.ifBlank { "main" }) }
-    var mode by remember { mutableStateOf(initialMode) }
-    var ftpPort by remember { mutableStateOf(initialFtpPort) }
-    var webdavPort by remember { mutableStateOf(initialWebdavPort) }
-    var username by remember { mutableStateOf(initialUsername) }
-    var password by remember { mutableStateOf(initialPassword) }
-    var showPassword by remember { mutableStateOf(false) }
+    var showToken by remember { mutableStateOf(false) }
 
     // 判定：owner/repo 与某个已配置/扫描到的仓库匹配 → 绑定已有仓库；否则创建新仓库。
     // 注意要兼容两种情况：
@@ -332,7 +370,7 @@ private fun SetupDialog(
 
     AlertDialog(
         onDismissRequest = { if (!isWorking) onDismiss() },
-        title = { Text("配置") },
+        title = { Text("仓库配置") },
         text = {
             // 注意：AlertDialog 的 text 槽位高度有界，直接放 LazyColumn 会因约束冲突崩溃。
             // 这里用带高度上限的可滚动 Column 替代。
@@ -354,8 +392,16 @@ private fun SetupDialog(
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     placeholder = { Text("ghp_… 或 github_pat_…") },
-                    visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                    visualTransformation = if (showToken) VisualTransformation.None else PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    trailingIcon = {
+                        IconButton(onClick = { showToken = !showToken }) {
+                            Icon(
+                                if (showToken) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = if (showToken) "隐藏令牌" else "显示令牌",
+                            )
+                        }
+                    },
                     supportingText = {
                         Text(
                             "需 repo 权限（classic 令牌）或 Contents 读写权限（fine-grained 令牌）",
@@ -363,9 +409,6 @@ private fun SetupDialog(
                         )
                     },
                 )
-                TextButton(onClick = { showPassword = !showPassword }) {
-                    Text(if (showPassword) "隐藏令牌" else "显示令牌")
-                }
 
                 // 扫描并选择已有仓库
                 TextButton(
@@ -461,9 +504,80 @@ private fun SetupDialog(
                     color = if (isBinding) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary,
                 )
 
-                Spacer(Modifier.height(4.dp))
-                Text("服务设置", style = MaterialTheme.typography.labelLarge)
+                // 初始化失败：直接显示在对话框内部，避免被对话框遮挡看不到
+                if (setupState is SetupState.Error) {
+                    Text(
+                        "保存失败：${(setupState as SetupState.Error).message}",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = !isWorking,
+                onClick = {
+                    vm.setupRepo(token, owner, repo, branch, createNew = !isBinding)
+                },
+            ) {
+                if (isWorking) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.width(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(
+                    when {
+                        isWorking -> "处理中…"
+                        isBinding -> "绑定并保存"
+                        else -> "创建并保存"
+                    }
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !isWorking) { Text("取消") }
+        },
+    )
+}
 
+/** 服务设置对话框：协议 / 端口 / 访问账号 / 仅本机访问 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ServerSetupDialog(
+    vm: MainViewModel,
+    initialMode: ServerMode,
+    initialFtpPort: String,
+    initialWebdavPort: String,
+    initialUsername: String,
+    initialPassword: String,
+    initialLoopbackOnly: Boolean,
+    onDismiss: () -> Unit,
+) {
+    var mode by remember { mutableStateOf(initialMode) }
+    var ftpPort by remember { mutableStateOf(initialFtpPort) }
+    var webdavPort by remember { mutableStateOf(initialWebdavPort) }
+    var username by remember { mutableStateOf(initialUsername) }
+    var password by remember { mutableStateOf(initialPassword) }
+    var loopbackOnly by remember { mutableStateOf(initialLoopbackOnly) }
+    var showPassword by remember { mutableStateOf(false) }
+    var saving by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = { if (!saving) onDismiss() },
+        title = { Text("服务设置") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text("协议", style = MaterialTheme.typography.labelLarge)
                 SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                     ServerMode.entries.forEachIndexed { index, m ->
                         SegmentedButton(
@@ -506,6 +620,14 @@ private fun SetupDialog(
                     singleLine = true,
                     label = { Text("访问密码（可选）") },
                     visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { showPassword = !showPassword }) {
+                            Icon(
+                                if (showPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = if (showPassword) "隐藏密码" else "显示密码",
+                            )
+                        }
+                    },
                     supportingText = {
                         Text(
                             "仅用于局域网访问认证，可与 GitHub 令牌不同",
@@ -514,49 +636,48 @@ private fun SetupDialog(
                     },
                 )
 
-                // 初始化失败：直接显示在对话框内部，避免被对话框遮挡看不到
-                if (setupState is SetupState.Error) {
-                    Text(
-                        "保存失败：${(setupState as SetupState.Error).message}",
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodyMedium,
+                // 仅本机访问开关
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("仅本机访问", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "开启后只监听 127.0.0.1，局域网内其他设备无法访问，更安全",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = loopbackOnly,
+                        onCheckedChange = { loopbackOnly = it },
                     )
                 }
             }
         },
         confirmButton = {
             Button(
-                enabled = !isWorking,
+                enabled = !saving,
                 onClick = {
+                    saving = true
                     vm.saveServerSettings(
                         mode = mode,
                         ftpPort = ftpPort.toIntOrNull() ?: 2121,
                         webdavPort = webdavPort.toIntOrNull() ?: 8080,
                         username = username.trim(),
                         password = password,
+                        loopbackOnly = loopbackOnly,
                     )
-                    vm.setupRepo(token, owner, repo, branch, createNew = !isBinding)
+                    onDismiss()
                 },
             ) {
-                if (isWorking) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.width(16.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                    )
-                    Spacer(Modifier.width(8.dp))
-                }
-                Text(
-                    when {
-                        isWorking -> "处理中…"
-                        isBinding -> "绑定并保存"
-                        else -> "创建并保存"
-                    }
-                )
+                Text("保存")
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !isWorking) { Text("取消") }
+            TextButton(onClick = onDismiss, enabled = !saving) { Text("取消") }
         },
     )
 }

@@ -34,6 +34,8 @@ class FtpServer(
     private val repo: GitRepository,
     private val credentials: () -> Pair<String, String>,
     private val logger: (String) -> Unit = {},
+    /** 绑定地址；null = 监听所有网卡（局域网），127.0.0.1 = 仅本机 */
+    private val bindAddress: String? = null,
 ) {
     private var serverSocket: ServerSocket? = null
     private val running = AtomicBoolean(false)
@@ -46,7 +48,11 @@ class FtpServer(
     fun start() {
         val ss = ServerSocket()
         ss.reuseAddress = true
-        ss.bind(InetSocketAddress(port))
+        if (bindAddress == null) {
+            ss.bind(InetSocketAddress(port))
+        } else {
+            ss.bind(InetSocketAddress(bindAddress, port))
+        }
         serverSocket = ss
         running.set(true)
         Thread {
@@ -294,6 +300,9 @@ class FtpServer(
         // ---------- 数据连接 ----------
 
         private fun localIp(): String {
+            // 仅监听回环时，PASV 数据连接地址也必须通告为 127.0.0.1，
+            // 否则客户端会去连接局域网 IP 导致数据连接失败。
+            if (bindAddress == "127.0.0.1") return "127.0.0.1"
             return try {
                 val ifaces = java.net.NetworkInterface.getNetworkInterfaces()
                 var candidate: String? = null

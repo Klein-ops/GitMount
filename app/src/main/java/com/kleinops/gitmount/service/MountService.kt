@@ -147,12 +147,14 @@ class MountService : Service() {
                 LogBus.info("仓库连接正常，根目录 ${probes.size} 项")
 
                 val credentials = { settings.username to settings.password }
-                val lanIp = NetUtils.lanIpv4()
+                // loopbackOnly=true 时只监听 127.0.0.1，不暴露局域网
+                val bindAddr = if (settings.loopbackOnly) "127.0.0.1" else null
+                val lanIp = if (settings.loopbackOnly) null else NetUtils.lanIpv4()
 
                 val actualPort = when (mode) {
                     ServerMode.WEBDAV -> {
                         val handler = WebDavHandler(repo) { credentials() }
-                        val server = HttpServer(port) { exchange -> handler.handle(exchange) }
+                        val server = HttpServer(port, { exchange -> handler.handle(exchange) }, bindAddr)
                         server.start()
                         httpServer = server
                         LogBus.info("WebDAV 服务已启动：http://$lanIp:${server.boundPort}/")
@@ -164,6 +166,7 @@ class MountService : Service() {
                             repo = repo,
                             credentials = credentials,
                             logger = { msg -> LogBus.info(msg) },
+                            bindAddress = bindAddr,
                         )
                         server.start()
                         ftpServer = server
@@ -181,6 +184,7 @@ class MountService : Service() {
                         lanIp = lanIp,
                         username = settings.username,
                         password = settings.password,
+                        loopbackOnly = settings.loopbackOnly,
                     )
                 )
                 updateNotification(

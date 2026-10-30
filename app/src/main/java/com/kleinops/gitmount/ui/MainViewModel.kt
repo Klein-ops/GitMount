@@ -156,13 +156,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return if (login.isNullOrBlank()) "owner" else login
     }
 
-    fun saveServerSettings(mode: ServerMode, ftpPort: Int, webdavPort: Int, username: String, password: String) {
+    fun saveServerSettings(mode: ServerMode, ftpPort: Int, webdavPort: Int, username: String, password: String, loopbackOnly: Boolean) {
         if (username.isBlank() || password.isBlank()) {
             LogBus.warn("访问账号或密码为空，服务启动后无法登录")
         }
         viewModelScope.launch {
-            settingsRepo.saveServer(mode.name, ftpPort, webdavPort, username, password)
-            LogBus.info("服务设置已保存：${mode.label} / 端口 ${if (mode == ServerMode.FTP) ftpPort else webdavPort}")
+            settingsRepo.saveServer(mode.name, ftpPort, webdavPort, username, password, loopbackOnly)
+            LogBus.info("服务设置已保存：${mode.label} / 端口 ${if (mode == ServerMode.FTP) ftpPort else webdavPort} / ${if (loopbackOnly) "仅本机" else "局域网"}")
         }
     }
 

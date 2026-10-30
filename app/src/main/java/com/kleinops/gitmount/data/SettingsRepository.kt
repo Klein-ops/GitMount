@@ -6,6 +6,7 @@ import android.security.keystore.KeyProperties
 import android.util.Base64
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -31,6 +32,8 @@ data class AppSettings(
     val webdavPort: Int = 8080,
     val username: String = "gitmount",
     val password: String = "",
+    /** true = 服务只监听 127.0.0.1，仅本机可访问，不暴露局域网 */
+    val loopbackOnly: Boolean = false,
 ) {
     val isConfigured: Boolean get() = token.isNotBlank() && owner.isNotBlank() && repoName.isNotBlank()
 }
@@ -94,6 +97,7 @@ class SettingsRepository(private val context: Context) {
         val WEBDAV_PORT = intPreferencesKey("webdav_port")
         val USERNAME = stringPreferencesKey("username")
         val PASSWORD = stringPreferencesKey("password")
+        val LOOPBACK_ONLY = booleanPreferencesKey("loopback_only")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { p ->
@@ -107,6 +111,7 @@ class SettingsRepository(private val context: Context) {
             webdavPort = p[Keys.WEBDAV_PORT] ?: 8080,
             username = p[Keys.USERNAME] ?: "gitmount",
             password = p[Keys.PASSWORD] ?: "",
+            loopbackOnly = p[Keys.LOOPBACK_ONLY] ?: false,
         )
     }
 
@@ -119,13 +124,14 @@ class SettingsRepository(private val context: Context) {
         }
     }
 
-    suspend fun saveServer(mode: String, ftpPort: Int, webdavPort: Int, username: String, password: String) {
+    suspend fun saveServer(mode: String, ftpPort: Int, webdavPort: Int, username: String, password: String, loopbackOnly: Boolean) {
         context.dataStore.edit { p ->
             p[Keys.MODE] = mode
             p[Keys.FTP_PORT] = ftpPort
             p[Keys.WEBDAV_PORT] = webdavPort
             p[Keys.USERNAME] = username
             p[Keys.PASSWORD] = password
+            p[Keys.LOOPBACK_ONLY] = loopbackOnly
         }
     }
 

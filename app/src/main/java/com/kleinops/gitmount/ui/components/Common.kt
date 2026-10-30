@@ -1,6 +1,7 @@
 package com.kleinops.gitmount.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -80,6 +81,43 @@ fun InfoRow(
             },
             fontWeight = if (mono) FontWeight.Medium else FontWeight.Normal,
             color = valueColor,
+        )
+    }
+}
+
+/** 可点击复制的键值行（地址类信息用，点击触发 onClick） */
+@Composable
+fun ClickableInfoRow(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+    mono: Boolean = true,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 6.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(
+            text = value,
+            style = if (mono) {
+                MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace)
+            } else {
+                MaterialTheme.typography.bodyMedium
+            },
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.primary,
+            maxLines = 1,
         )
     }
 }
