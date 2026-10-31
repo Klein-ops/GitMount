@@ -543,6 +543,7 @@ class FtpServer(
                 }
                 reply(552, "内存不足，请关闭其他应用后重试")
             } catch (e: Exception) {
+                LogBus.error("FTP 写入失败：${path} → ${e.message}")
                 try {
                     dataSocket.close()
                 } catch (_: IOException) {
