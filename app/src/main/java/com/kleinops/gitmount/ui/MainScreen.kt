@@ -66,6 +66,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.kleinops.gitmount.R
 import com.kleinops.gitmount.data.ServerMode
 import com.kleinops.gitmount.service.MountService
 import com.kleinops.gitmount.ui.components.ClickableInfoRow
