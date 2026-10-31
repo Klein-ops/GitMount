@@ -525,12 +525,14 @@ class FtpServer(
                         reply(552, "文件超过 ${GitRepository.MAX_FILE_SIZE / 1024 / 1024}MB 上限")
                         return
                     }
+                LogBus.info("FTP 收到上传数据 ${incoming.size} 字节 → $path")
                 val finalBytes = if (append && repo.exists(path)) {
                     repo.read(path) + incoming
                 } else {
                     incoming
                 }
                 repo.write(path, finalBytes)
+                LogBus.info("FTP 上传已写入 GitHub：$path（${finalBytes.size} 字节）")
                 dataSocket.close()
                 reply(226, "上传完成")
             } catch (e: OutOfMemoryError) {
@@ -561,6 +563,11 @@ class FtpServer(
             while (true) {
                 val n = try {
                     input.read(readBuf)
+                } catch (e: java.net.SocketTimeoutException) {
+                    // 客户端发完数据但未关闭数据连接（在等 226）时，空闲超时判定传输结束。
+                    // 若不超时判定，服务端会永久阻塞在 read() 等待 EOF，出现“传到最后卡住”。
+                    LogBus.warn("FTP 数据连接空闲超时，按传输结束处理（已收 ${size} 字节）")
+                    break
                 } catch (e: IOException) {
                     return java.util.Arrays.copyOf(data, size)
                 }
