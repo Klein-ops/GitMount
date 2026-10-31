@@ -55,6 +55,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -98,6 +99,22 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
     // 已配置仓库时，进入主界面自动查一次容量（后续可手动刷新）
     LaunchedEffect(settings.isConfigured) {
         if (settings.isConfigured) vm.loadRepoInfo()
+    }
+
+    // 打开应用自动启动服务（设置里可开关）。
+    // 只在本次进程首次满足条件时触发一次，避免“用户手动停止后 running=false 又自动拉起”
+    // 的死循环——autoStartTriggered 置位后，即使之后 running 变化也不再触发。
+    var autoStartTriggered by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(settings.isConfigured, settings.autoStart) {
+        if (settings.isConfigured && settings.autoStart && !autoStartTriggered) {
+            autoStartTriggered = true
+            if (!server.running && !server.starting) {
+                val mode = runCatching { ServerMode.valueOf(settings.mode) }
+                    .getOrDefault(ServerMode.WEBDAV)
+                val port = if (mode == ServerMode.FTP) settings.ftpPort else settings.webdavPort
+                MountService.start(context, mode, port)
+            }
+        }
     }
 
     // 初始化成功：关闭仓库对话框并用 Snackbar 提示。
@@ -453,6 +470,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
             initialPassword = settings.password,
             initialLoopbackOnly = settings.loopbackOnly,
             initialHideNotification = settings.hideNotification,
+            initialAutoStart = settings.autoStart,
             onDismiss = { showServerSetup = false },
         )
     }
@@ -738,6 +756,7 @@ private fun ServerSetupDialog(
     initialPassword: String,
     initialLoopbackOnly: Boolean,
     initialHideNotification: Boolean,
+    initialAutoStart: Boolean,
     onDismiss: () -> Unit,
 ) {
     var mode by remember { mutableStateOf(initialMode) }
@@ -747,9 +766,36 @@ private fun ServerSetupDialog(
     var password by remember { mutableStateOf(initialPassword) }
     var loopbackOnly by remember { mutableStateOf(initialLoopbackOnly) }
     var hideNotification by remember { mutableStateOf(initialHideNotification) }
+    var autoStart by remember { mutableStateOf(initialAutoStart) }
     var showPassword by remember { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
     val context = LocalContext.current
+
+    // 打开电池优化白名单：
+    // 1) 优先 ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS——直接弹针对本应用的
+    //    “允许/不允许”系统对话框（最直接有效，需要 REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 权限）；
+    // 2) 失败降级到“全部应用”列表页；
+    // 3) 再失败用 Toast 明确提示，绝不静默吞掉（用户之前反馈“点了没反应”就是静默吞异常导致）。
+    fun openBatterySettings() {
+        runCatching {
+            context.startActivity(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    android.net.Uri.parse("package:${context.packageName}"),
+                )
+            )
+        }.onFailure {
+            runCatching {
+                context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            }.onFailure {
+                android.widget.Toast.makeText(
+                    context,
+                    context.getString(R.string.settings_bg_battery_err),
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+            }
+        }
+    }
 
     AlertDialog(
         onDismissRequest = { if (!saving) onDismiss() },
@@ -876,19 +922,30 @@ private fun ServerSetupDialog(
                         )
                     }
                     TextButton(
-                        onClick = {
-                            runCatching {
-                                context.startActivity(
-                                    Intent(
-                                        Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS,
-                                        android.net.Uri.parse("package:${context.packageName}"),
-                                    )
-                                )
-                            }
-                        },
+                        onClick = { openBatterySettings() },
                     ) {
                         Text(stringResource(R.string.settings_bg_battery_btn))
                     }
+                }
+
+                // 打开应用时自动启动服务
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(stringResource(R.string.settings_bg_auto_start), style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            stringResource(R.string.settings_bg_auto_start_desc),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = autoStart,
+                        onCheckedChange = { autoStart = it },
+                    )
                 }
             }
         },
@@ -905,6 +962,7 @@ private fun ServerSetupDialog(
                         password = password,
                         loopbackOnly = loopbackOnly,
                         hideNotification = hideNotification,
+                        autoStart = autoStart,
                     )
                     onDismiss()
                 },

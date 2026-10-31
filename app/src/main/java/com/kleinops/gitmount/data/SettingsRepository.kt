@@ -36,6 +36,8 @@ data class AppSettings(
     val loopbackOnly: Boolean = false,
     /** true = 隐藏前台服务常驻通知（改用静默渠道），降低后台存在感 */
     val hideNotification: Boolean = false,
+    /** true = 打开 App 时自动启动服务（需已配置仓库） */
+    val autoStart: Boolean = true,
 ) {
     val isConfigured: Boolean get() = token.isNotBlank() && owner.isNotBlank() && repoName.isNotBlank()
 }
@@ -101,6 +103,7 @@ class SettingsRepository(private val context: Context) {
         val PASSWORD = stringPreferencesKey("password")
         val LOOPBACK_ONLY = booleanPreferencesKey("loopback_only")
         val HIDE_NOTIFICATION = booleanPreferencesKey("hide_notification")
+        val AUTO_START = booleanPreferencesKey("auto_start")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { p ->
@@ -116,6 +119,7 @@ class SettingsRepository(private val context: Context) {
             password = p[Keys.PASSWORD] ?: "",
             loopbackOnly = p[Keys.LOOPBACK_ONLY] ?: false,
             hideNotification = p[Keys.HIDE_NOTIFICATION] ?: false,
+            autoStart = p[Keys.AUTO_START] ?: true,
         )
     }
 
@@ -136,6 +140,7 @@ class SettingsRepository(private val context: Context) {
         password: String,
         loopbackOnly: Boolean,
         hideNotification: Boolean,
+        autoStart: Boolean,
     ) {
         context.dataStore.edit { p ->
             p[Keys.MODE] = mode
@@ -145,6 +150,7 @@ class SettingsRepository(private val context: Context) {
             p[Keys.PASSWORD] = password
             p[Keys.LOOPBACK_ONLY] = loopbackOnly
             p[Keys.HIDE_NOTIFICATION] = hideNotification
+            p[Keys.AUTO_START] = autoStart
         }
     }
 
