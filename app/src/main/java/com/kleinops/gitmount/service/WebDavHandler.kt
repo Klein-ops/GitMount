@@ -3,6 +3,7 @@ package com.kleinops.gitmount.service
 import android.util.Base64
 import com.kleinops.gitmount.data.GitRepository
 import com.kleinops.gitmount.data.VfsNode
+import com.kleinops.gitmount.service.LogBus
 import com.kleinops.gitmount.service.http.HttpExchange
 import java.nio.charset.StandardCharsets
 import java.util.UUID
@@ -227,6 +228,9 @@ class WebDavHandler(
                     "Location" to exchange.path,
                 ),
             )
+        } catch (e: OutOfMemoryError) {
+            LogBus.error("写入内存不足：${e.message}")
+            exchange.respond(500, body = "内存不足，请关闭其他应用后重试".toByteArray())
         } catch (e: Exception) {
             exchange.respond(409, body = e.message?.toByteArray() ?: ByteArray(0))
         }

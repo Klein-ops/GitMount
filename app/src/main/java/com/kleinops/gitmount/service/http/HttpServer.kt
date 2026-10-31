@@ -137,16 +137,18 @@ class HttpServer(
         }
         val body = if (cl > 0) {
             // 已通过上限检查（cl <= 100MB < Int.MAX_VALUE），toInt() 安全
-            val bytes = ByteArrayOutputStream(cl.toInt())
-            val buf = ByteArray(8192)
+            // 直接按 Content-Length 预分配精确数组并读满，避免 ByteArrayOutputStream
+            // 的 toByteArray() 再复制一份（78MB 上传峰值 = 2×78MB，默认堆必炸）。
+            val bytes = ByteArray(cl.toInt())
+            var offset = 0
             var remaining = cl
             while (remaining > 0) {
-                val n = input.read(buf, 0, minOf(buf.size.toLong(), remaining).toInt())
+                val n = input.read(bytes, offset, minOf(remaining, Int.MAX_VALUE.toLong()).toInt())
                 if (n < 0) throw IOException("eof in body")
-                bytes.write(buf, 0, n)
+                offset += n
                 remaining -= n
             }
-            bytes.toByteArray()
+            bytes
         } else {
             ByteArray(0)
         }

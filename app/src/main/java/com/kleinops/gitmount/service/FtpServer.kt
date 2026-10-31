@@ -2,8 +2,8 @@ package com.kleinops.gitmount.service
 
 import com.kleinops.gitmount.data.GitRepository
 import com.kleinops.gitmount.data.VfsNode
+import com.kleinops.gitmount.service.LogBus
 import java.io.BufferedReader
-import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.InputStreamReader
@@ -522,6 +522,13 @@ class FtpServer(
                 repo.write(path, finalBytes)
                 dataSocket.close()
                 reply(226, "上传完成")
+            } catch (e: OutOfMemoryError) {
+                LogBus.error("上传内存不足：${e.message}")
+                try {
+                    dataSocket.close()
+                } catch (_: IOException) {
+                }
+                reply(552, "内存不足，请关闭其他应用后重试")
             } catch (e: Exception) {
                 try {
                     dataSocket.close()
@@ -533,21 +540,30 @@ class FtpServer(
 
         /** 流式读取数据连接，最多读 limit 字节；超过则返回 null（由调用方中断并回 552） */
         private fun readLimited(input: InputStream, limit: Long): ByteArray? {
-            val buf = ByteArray(8192)
-            val out = ByteArrayOutputStream(limit.coerceAtMost(8192L).toInt())
-            var total = 0L
+            val readBuf = ByteArray(64 * 1024)
+            // 自管理字节数组 + 固定 1MB 增量扩容：
+            // - 相比 ByteArrayOutputStream 的翻倍扩容（64MB→128MB 时新旧并存峰值 192MB），
+            //   这里峰值 ≈ 数据量 + 1MB，78MB 文件在默认堆下不会 OOM；
+            // - 固定增量保证扩容次数少（78MB 约 78 次），均摊复制成本可接受。
+            var data = ByteArray(0)
+            var size = 0
             while (true) {
                 val n = try {
-                    input.read(buf)
+                    input.read(readBuf)
                 } catch (e: IOException) {
-                    return out.toByteArray()
+                    return java.util.Arrays.copyOf(data, size)
                 }
                 if (n < 0) break
-                total += n
-                if (total > limit) return null
-                out.write(buf, 0, n)
+                if (size.toLong() + n > limit) return null
+                if (size + n > data.size) {
+                    val need = size + n
+                    val newCap = need.coerceAtLeast(data.size + 1024 * 1024)
+                    data = java.util.Arrays.copyOf(data, newCap)
+                }
+                System.arraycopy(readBuf, 0, data, size, n)
+                size += n
             }
-            return out.toByteArray()
+            return java.util.Arrays.copyOf(data, size)
         }
 
         private fun doDelete(arg: String) {
