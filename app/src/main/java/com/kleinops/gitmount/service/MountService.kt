@@ -13,8 +13,6 @@ import androidx.core.app.NotificationCompat
 import com.kleinops.gitmount.MainActivity
 import com.kleinops.gitmount.R
 import com.kleinops.gitmount.data.GitHubClient
-import com.kleinops.gitmount.data.GitNative
-import com.kleinops.gitmount.data.GitPushUploader
 import com.kleinops.gitmount.data.GitRepository
 import com.kleinops.gitmount.data.ServerMode
 import com.kleinops.gitmount.data.SettingsRepository
@@ -148,14 +146,7 @@ class MountService : Service() {
                 hiddenNotification = settings.hideNotification
 
                 val client = GitHubClient(settings.token)
-                // 内置 git 二进制（arm64）：大文件上传自动走 git push 链路
-                val gitNative = GitNative(this)
-                val pushUploader = if (gitNative.supported()) {
-                    GitPushUploader(gitNative, settings.token, settings.owner, settings.repoName, settings.branch)
-                } else {
-                    null
-                }
-                val repo = GitRepository(client, settings.owner, settings.repoName, settings.branch, pushUploader)
+                val repo = GitRepository(client, settings.owner, settings.repoName, settings.branch)
 
                 // 启动前做一次真实连通性校验，避免“显示已启动但实际不可用”
                 val probes = repo.visibleList("/")

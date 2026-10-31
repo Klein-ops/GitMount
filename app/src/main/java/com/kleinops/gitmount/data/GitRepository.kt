@@ -31,8 +31,6 @@ class GitRepository(
     private val owner: String,
     private val repo: String,
     private val branch: String,
-    /** 大文件走 git push 的上传器（null = 未启用，仍全部走 Contents API） */
-    private val pushUploader: GitPushUploader? = null,
 ) {
 
     companion object {
@@ -42,18 +40,10 @@ class GitRepository(
         private const val CACHE_TTL_MS = 30_000L
 
         /**
-         * 单文件上限：GitHub 支持单文件 < 100MB（git 协议）。
-         * Contents API 上限是 base64 后请求体 ≤100MB（≈原始 75MB），
-         * 而 git push 协议上限是原始文件 100MB，因此大文件走 git push 链路。
+         * 单文件上限：GitHub Contents API 限制为 100MB（解码后）。
+         * 本地先拦截，避免把超大文件发到 GitHub 再被拒绝。
          */
         const val MAX_FILE_SIZE = 100L * 1024 * 1024
-
-        /**
-         * 切换 git push 的大小阈值：≥50MB 直接走 git push 链路，
-         * 避免 Contents API 的 base64 膨胀逼近 100MB 被拒（原始 75MB 即炸）。
-         * 小文件仍走 Contents API（快、无额外 fetch 开销）。
-         */
-        const val GIT_PUSH_THRESHOLD = 50L * 1024 * 1024
 
         /** 文件内容缓存仅用于 ≤1MB 的小文件 */
         private const val FILE_CACHE_TTL_MS = 60_000L
@@ -253,36 +243,20 @@ class GitRepository(
     /**
      * 写入文件（自动判断新建还是覆盖）。
      * 覆盖时总是先取最新 sha，避免客户端缓存过期导致 409 冲突。
-     *
-     * 大文件（≥ [GIT_PUSH_THRESHOLD]）自动切到内嵌 git push 链路：
-     * 走 git 协议直接推增量对象，绕开 GitHub Contents API 的 base64 上限
-     * （base64 后 ≤100MB ≈ 原始 75MB），因此 78MB 这类文件也能上传。
      */
     fun write(path: String, data: ByteArray, commitMessage: String? = null): VfsNode {
         reclaimIfIdle()
         val norm = normalize(path)
         if (norm == "/") throw IOException("不能写入根目录")
         if (data.size > MAX_FILE_SIZE) {
-            throw IOException("文件超过 ${MAX_FILE_SIZE / 1024 / 1024}MB 上限，GitHub 不支持大于 100MB 的单文件")
+            throw IOException("文件超过 ${MAX_FILE_SIZE / 1024 / 1024}MB 上限，GitHub Contents API 不支持")
         }
         // 串行化写阶段：并发大文件上传会叠加内存峰值并触发 GitHub 409，
         // 见 writeLock 注释。ReentrantLock 可重入，move/copy 递归调用 write 不会死锁。
         writeLock.lock()
         return try {
-            val gitPath = toGitPath(norm)
-            if (pushUploader != null && data.size >= GIT_PUSH_THRESHOLD) {
-                // git push 链路：直接按目标路径构造 tree/commit 并推送
-                val existing = try {
-                    client.getFileMeta(owner, repo, gitPath, branch)?.let { true } ?: false
-                } catch (_: IOException) { false }
-                val msg = commitMessage ?: if (existing) "更新 ${nameOf(norm)}" else "上传 ${nameOf(norm)}"
-                val blobSha = pushUploader.upload(gitPath, data, msg)
-                invalidate(parentOf(norm))
-                invalidate(norm)
-                return VfsNode(nameOf(norm), norm, false, data.size.toLong(), blobSha)
-            }
-            // Contents API 快路径（小文件）
             ensureParentDirs(norm)
+            val gitPath = toGitPath(norm)
             val existing = client.getFileMeta(owner, repo, gitPath, branch)
             val msg = commitMessage ?: if (existing == null) "上传 ${nameOf(norm)}" else "更新 ${nameOf(norm)}"
             val meta = client.putFile(owner, repo, gitPath, data, existing?.sha, msg, branch)
