@@ -33,6 +33,8 @@ object LogBus {
         val entry = LogEntry(time, level, msg)
         // 用 update 做原子读-改-写；直接赋值在并发下会丢失其他线程刚写入的条目
         _logs.update { current -> (listOf(entry) + current).take(MAX) }
+        // 同步落盘（异步写），供用户直接读取日志文件排查问题
+        FileLogger.append(level, msg)
     }
 
     fun clear() {
