@@ -85,6 +85,11 @@ class FtpServer(
         // 空闲命令连接超时：客户端长时间不发命令（或静默挂机）时回收线程，
         // 避免长期占着会话线程。注意 FTP 数据连接（传输中）不受影响。
         private val COMMAND_IDLE_TIMEOUT_MS = 60_000
+        /** 数据连接等待客户端连入的超时（PASV 后客户端不连则回收会话线程，避免挂死） */
+        private val DATA_CONNECT_TIMEOUT_MS = 30_000
+        /** 数据连接空闲超时：传输中超过该时长无新数据，视为客户端已发完（在等 226），
+         *  终止 read() 对 EOF 的无限等待，解除“传到最后卡住”的死锁 */
+        private val DATA_IDLE_TIMEOUT_MS = 60_000
 
         private val input: BufferedReader by lazy {
             try {
@@ -367,8 +372,13 @@ class FtpServer(
             val ps = passiveServer
             if (ps != null) {
                 return try {
+                    // PASV 后客户端迟迟不连数据端口时，accept 超时避免会话线程挂死
+                    ps.soTimeout = DATA_CONNECT_TIMEOUT_MS
                     val s = ps.accept()
                     closePassive()
+                    // 关键：数据连接加空闲超时。部分客户端传完数据不关闭连接（等 226），
+                    // 若服务端一直等 EOF 就会死锁，表现为“传到最后卡住”。超时即判定传输结束。
+                    s.soTimeout = DATA_IDLE_TIMEOUT_MS
                     s
                 } catch (e: IOException) {
                     closePassive()
@@ -380,6 +390,7 @@ class FtpServer(
                 return try {
                     Socket().apply {
                         connect(InetSocketAddress(addr, activePort), 5000)
+                        soTimeout = DATA_IDLE_TIMEOUT_MS
                     }
                 } catch (e: IOException) {
                     null
