@@ -71,6 +71,14 @@ class GitRepository(
     @Volatile
     private var lastActiveAt: Long = System.currentTimeMillis()
 
+    /**
+     * 全局写锁：GitHub Contents API 的单文件写入本质是“读最新 sha → 提交”两个步骤，
+     * 多客户端并发覆盖同一文件会 409；且大文件写入本身吃内存（base64 请求体），
+     * 并发的多个大文件写入会瞬间打爆默认堆。这里把写操作全部串行化，
+     * 一次只允许一个写请求进入 GitHub 提交阶段，从根上消除并发叠加。
+     */
+    private val writeLock = java.util.concurrent.locks.ReentrantLock()
+
     /** 每次对外操作前调用：超过空闲阈值则清空缓存，把内存还给系统 */
     private fun reclaimIfIdle() {
         val now = System.currentTimeMillis()
@@ -243,16 +251,21 @@ class GitRepository(
         if (data.size > MAX_FILE_SIZE) {
             throw IOException("文件超过 ${MAX_FILE_SIZE / 1024 / 1024}MB 上限，GitHub Contents API 不支持")
         }
-        ensureParentDirs(norm)
-
-        val gitPath = toGitPath(norm)
-        val existing = client.getFileMeta(owner, repo, gitPath, branch)
-        val msg = commitMessage ?: if (existing == null) "上传 ${nameOf(norm)}" else "更新 ${nameOf(norm)}"
-        val meta = client.putFile(owner, repo, gitPath, data, existing?.sha, msg, branch)
-
-        invalidate(parentOf(norm))
-        invalidate(norm)
-        return VfsNode(nameOf(norm), norm, false, data.size.toLong(), meta.sha)
+        // 串行化写阶段：并发大文件上传会叠加内存峰值并触发 GitHub 409，
+        // 见 writeLock 注释。ReentrantLock 可重入，move/copy 递归调用 write 不会死锁。
+        writeLock.lock()
+        return try {
+            ensureParentDirs(norm)
+            val gitPath = toGitPath(norm)
+            val existing = client.getFileMeta(owner, repo, gitPath, branch)
+            val msg = commitMessage ?: if (existing == null) "上传 ${nameOf(norm)}" else "更新 ${nameOf(norm)}"
+            val meta = client.putFile(owner, repo, gitPath, data, existing?.sha, msg, branch)
+            invalidate(parentOf(norm))
+            invalidate(norm)
+            VfsNode(nameOf(norm), norm, false, data.size.toLong(), meta.sha)
+        } finally {
+            writeLock.unlock()
+        }
     }
 
     /** 创建目录：GitHub 无空目录，用 .gitkeep 占位 */

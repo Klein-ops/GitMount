@@ -6,7 +6,9 @@ import java.util.concurrent.TimeUnit
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okio.BufferedSink
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -338,15 +340,21 @@ class GitHubClient(private val token: String) {
     ): FileMeta {
         val payload = JSONObject()
             .put("message", message)
-            .put("content", Base64.encodeToString(content, Base64.NO_WRAP))
             .put("branch", branch)
+            .put("content", content) // 占位，实际值由流式 RequestBody 覆盖
         sha?.let { payload.put("sha", it) }
         val url = url("/repos/$owner/$repo/contents/${encodePath(path)}")
-        val body = execute(
-            authRequest(url)
-                .put(payload.toString().toRequestBody(jsonMedia))
+
+        // 关键内存优化：78MB 文件的 base64 文本约 104MB，若用 encodeToString 生成
+        // 大 String（UTF-16 下 208MB），再拼进 JSON.toString() 又复制一份，直接 OOM。
+        // 这里改为流式 base64 RequestBody：content 只保留一份原始字节，
+        // 编码产物边写边丢，峰值内存 = content 大小 + 一小块缓冲。
+        val body = Base64RequestBody(payload, "content", content)
+
+        val resp = execute(
+            authRequest(url).put(body)
         )
-        val o = JSONObject(body)
+        val o = JSONObject(resp)
         return FileMeta(o.optString("sha"), content.size.toLong())
     }
 
@@ -365,4 +373,70 @@ class GitHubClient(private val token: String) {
 
     private fun encodePath(path: String): String =
         path.split("/").joinToString("/") { java.net.URLEncoder.encode(it, "UTF-8").replace("+", "%20") }
+}
+
+/**
+ * 流式 base64 JSON RequestBody。
+ *
+ * 目的：避免大文件上传时把 base64 文本拼成超大 String。
+ * 例如 78MB 文件 → base64 约 104MB → Java String(UTF-16) 就是 208MB，
+ * 再并入 JSON.toString() 又复制一份，默认堆（256MB）直接 OOM。
+ *
+ * 实现：请求体形如 {"message":"...","branch":"...","content":"<base64>","sha":"..."}，
+ * content 字段的 base64 按小块边编码边写入 sink，不整体驻留内存。
+ */
+private class Base64RequestBody(
+    private val payload: JSONObject,
+    private val contentKey: String,
+    private val content: ByteArray,
+) : RequestBody() {
+
+    private val b64Len: Long = ((content.size + 2L) / 3L) * 4L
+
+    override fun contentType(): okhttp3.MediaType? =
+        "application/json; charset=utf-8".toMediaType()
+
+    override fun contentLength(): Long = headBytes().size + b64Len + tailBytes().size
+
+    override fun writeTo(sink: BufferedSink) {
+        sink.write(headBytes())
+        // 按 3 字节一组（base64 严格 3→4），每次 3KB 源 → 4KB 文本，内存占用恒定
+        val chunk = 3072
+        var offset = 0
+        while (offset < content.size) {
+            val end = minOf(offset + chunk, content.size)
+            val piece = content.copyOfRange(offset, end)
+            sink.writeUtf8(Base64.encodeToString(piece, Base64.NO_WRAP))
+            offset = end
+        }
+        sink.write(tailBytes())
+    }
+
+    /** 请求体 head：非 content 字段 + content 键的开头引号 */
+    private fun headBytes(): ByteArray {
+        val sb = StringBuilder()
+        sb.append('{')
+        var first = true
+        fun sep() {
+            if (!first) sb.append(',') else first = false
+        }
+        payload.keys().forEach { key ->
+            if (key != contentKey) {
+                sep()
+                sb.append(JSONObject.quote(key)).append(':')
+                when (val v = payload.get(key)) {
+                    is String -> sb.append(JSONObject.quote(v))
+                    is Number, is Boolean -> sb.append(v)
+                    else -> sb.append(JSONObject.quote(v.toString()))
+                }
+            }
+        }
+        sep()
+        sb.append(JSONObject.quote(contentKey)).append(":\"")
+        return sb.toString().toByteArray(Charsets.UTF_8)
+    }
+
+    /** 请求体 tail：content 值收尾引号 + 闭合大括号 */
+    private fun tailBytes(): ByteArray =
+        "\"}".toByteArray(Charsets.UTF_8)
 }
