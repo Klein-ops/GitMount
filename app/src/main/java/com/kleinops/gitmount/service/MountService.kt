@@ -149,8 +149,7 @@ class MountService : Service() {
 
                 val client = GitHubClient(settings.token)
                 // 内置 git 二进制（arm64）：大文件上传自动走 git push 链路
-                // 注意：scope.launch 内 this 是 CoroutineScope，要用 this@MountService 取 Service（即 Context）
-                val gitNative = GitNative(this@MountService)
+                val gitNative = GitNative(this)
                 val pushUploader = if (gitNative.supported()) {
                     GitPushUploader(gitNative, settings.token, settings.owner, settings.repoName, settings.branch)
                 } else {
