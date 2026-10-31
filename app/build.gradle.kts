@@ -67,13 +67,6 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 
-    // git push 上传链路（替代 Contents API 的 base64 膨胀）：
-    // JGit 5.13.3 是 Java 8 兼容的稳定版，Android 上久经验证（MGit 同款），
-    // 依赖 slf4j-api，实测传 Android 前需确认不再使用 java.sql/javax.* 等受限 API。
-    implementation("org.eclipse.jgit:org.eclipse.jgit:5.13.3.202401111512-r")
-    // JGit 的日志走 slf4j；Android 上无绑定会打印警告，用 nop 绑定静默（不影响功能）
-    implementation("org.slf4j:slf4j-nop:1.7.36")
-
     // 说明：FTP / WebDAV 服务均为手写实现（ServerSocket + 协议子集），
     // 不引入 Apache FtpServer / 任何 WebDAV 库，减少 Android 兼容性与构建风险。
 
