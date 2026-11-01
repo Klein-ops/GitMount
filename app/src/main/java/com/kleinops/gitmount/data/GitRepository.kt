@@ -378,19 +378,26 @@ class GitRepository(
         if (from == to) return
         if (exists(to)) throw IOException("目标已存在：$to")
         val node = stat(from) ?: throw FileNotFoundException("源不存在：$from")
+        LogBus.info("FTP/WebDAV 移动开始 → $from -> $to")
 
         if (node.isDirectory) {
             createDirectory(to)
-            for (child in list(from, useCache = false)) {
+            val children = list(from, useCache = false)
+            LogBus.info("移动目录 $from：共 ${children.size} 项")
+            for (child in children) {
                 if (child.name == KEEP_FILE) continue
                 move(child.path, "$to/${child.name}")
             }
             delete(from)
         } else {
+            LogBus.info("移动文件（${node.size} 字节）→ 下载源...")
             val data = read(from)
+            LogBus.info("源已下载（${data.size} 字节）→ 上传目标...")
             write(to, data, "移动 ${node.name}")
+            LogBus.info("目标已上传 → 删除源...")
             delete(from)
         }
+        LogBus.info("移动完成 → $from -> $to")
     }
 
     /** 供 UI 展示的修改时间（GitHub Contents API 不提供文件 mtime，统一用当前时间占位） */
