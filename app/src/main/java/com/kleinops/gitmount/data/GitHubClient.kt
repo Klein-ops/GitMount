@@ -358,6 +358,43 @@ class GitHubClient(private val token: String) {
         return FileMeta(o.optString("sha"), content.size.toLong())
     }
 
+    /**
+     * 流式写入文件（创建或覆盖）：边读输入流边 base64 转发给 GitHub（chunked）。
+     *
+     * 与 putFile 的区别：putFile 需要完整 ByteArray（App 必须先把整个文件收进内存，
+     * 客户端进度会先飙到 100% 再开始真正上传，造成"假 100% / 卡顿"）。
+     * 本方法接受 InputStream，请求体长度未知 → OkHttp 走 Transfer-Encoding: chunked，
+     * 数据一边从上游读取一边写入 GitHub，客户端进度被 GitHub 真实速度拖住
+     * （chunked PUT 已在终端实测：GitHub 返回 HTTP 201）。
+     */
+    fun putFileStream(
+        owner: String,
+        repo: String,
+        path: String,
+        input: java.io.InputStream,
+        sha: String?,
+        message: String,
+        branch: String,
+    ): FileMeta {
+        val payload = JSONObject()
+            .put("message", message)
+            .put("branch", branch)
+        sha?.let { payload.put("sha", it) }
+        val url = url("/repos/$owner/$repo/contents/${encodePath(path)}")
+
+        val body = StreamingBase64RequestBody(payload, "content", input)
+        val resp = execute(
+            authRequest(url).put(body)
+        )
+        val o = JSONObject(resp)
+        // PUT 响应结构为 {content:{...,sha,size}, commit:{...}}，sha/size 在 content 内
+        val c = o.optJSONObject("content")
+        return FileMeta(
+            c?.optString("sha") ?: "",
+            c?.optLong("size") ?: 0L,
+        )
+    }
+
     /** 删除文件 */
     fun deleteFile(owner: String, repo: String, path: String, sha: String, message: String, branch: String) {
         val payload = JSONObject()
@@ -408,6 +445,97 @@ private class Base64RequestBody(
             val piece = content.copyOfRange(offset, end)
             sink.writeUtf8(Base64.encodeToString(piece, Base64.NO_WRAP))
             offset = end
+        }
+        sink.write(tailBytes())
+    }
+
+    /** 请求体 head：非 content 字段 + content 键的开头引号 */
+    private fun headBytes(): ByteArray {
+        val sb = StringBuilder()
+        sb.append('{')
+        var first = true
+        fun sep() {
+            if (!first) sb.append(',') else first = false
+        }
+        payload.keys().forEach { key ->
+            if (key != contentKey) {
+                sep()
+                sb.append(JSONObject.quote(key)).append(':')
+                when (val v = payload.get(key)) {
+                    is String -> sb.append(JSONObject.quote(v))
+                    is Number, is Boolean -> sb.append(v)
+                    else -> sb.append(JSONObject.quote(v.toString()))
+                }
+            }
+        }
+        sep()
+        sb.append(JSONObject.quote(contentKey)).append(":\"")
+        return sb.toString().toByteArray(Charsets.UTF_8)
+    }
+
+    /** 请求体 tail：content 值收尾引号 + 闭合大括号 */
+    private fun tailBytes(): ByteArray =
+        "\"}".toByteArray(Charsets.UTF_8)
+}
+
+/**
+ * 流式 base64 JSON RequestBody（边读边传）。
+ *
+ * 与 Base64RequestBody 的区别：数据源是 InputStream 而非 ByteArray，
+ * 且故意让 contentLength() 返回 -1（未知长度）→ OkHttp 走
+ * Transfer-Encoding: chunked，GitHub 按流式接收（已在终端实测
+ * chunked PUT 成功：HTTP 201）。
+ *
+ * 这样 FTP 数据连接收到的字节【边收边发】给 GitHub，客户端进度
+ * 会被 GitHub 公网真实速度拖住，不再出现"客户端 100% 但 GitHub
+ * 刚开始传"的假完成。
+ *
+ * base64 块边界：每 3072 字节源（3 的倍数）编码为 4096 字节文本，
+ * 块与块拼接后整体解码正确；最后不足一块的残余字节单独编码补 padding。
+ * 注意：InputStream.read() 不保证一次填满，必须用 fill 循环凑满一整块
+ * 再编码，否则块边界被打碎会导致解码错误（文件损坏）。
+ *
+ * 结束判定：input.read() 返回 -1（客户端关闭数据连接）或抛
+ * SocketTimeoutException（客户端发完但未关闭，在等 226，
+ * 对应 FtpServer 的 DATA_IDLE_TIMEOUT_MS 语义）均视为数据已收完，
+ * 把残余字节编码后写 tail 收尾请求。
+ */
+private class StreamingBase64RequestBody(
+    private val payload: JSONObject,
+    private val contentKey: String,
+    private val input: java.io.InputStream,
+) : RequestBody() {
+
+    override fun contentType(): okhttp3.MediaType? =
+        "application/json; charset=utf-8".toMediaType()
+
+    /** 返回 -1 = 长度未知 → OkHttp 对该请求体使用 chunked 传输 */
+    override fun contentLength(): Long = -1L
+
+    override fun writeTo(sink: BufferedSink) {
+        sink.write(headBytes())
+        val chunk = 3072
+        val buf = ByteArray(chunk)
+        var filled = 0
+        while (true) {
+            val n = try {
+                // 循环读直到填满 chunk 或 EOF：read() 不保证一次返回 len 字节
+                input.read(buf, filled, chunk - filled)
+            } catch (e: java.net.SocketTimeoutException) {
+                // 客户端发完数据但未关闭数据连接（在等 226），视为传输结束
+                break
+            }
+            if (n < 0) break
+            filled += n
+            if (filled == chunk) {
+                // 满一块：整块编码（无 padding），块边界严格 3072→4096
+                sink.writeUtf8(Base64.encodeToString(buf, Base64.NO_WRAP))
+                filled = 0
+            }
+        }
+        if (filled > 0) {
+            // 残余不足一块：单独编码（编码器自动补 padding）
+            sink.writeUtf8(Base64.encodeToString(java.util.Arrays.copyOf(buf, filled), Base64.NO_WRAP))
         }
         sink.write(tailBytes())
     }

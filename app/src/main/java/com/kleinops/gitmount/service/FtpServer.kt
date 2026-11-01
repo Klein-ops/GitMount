@@ -517,24 +517,31 @@ class FtpServer(
             reply(150, "请发送数据")
             val dataSocket = openDataSocket() ?: return
             try {
-                // 流式接收：边收边数，超过 100MB 上限立即中断并回 552。
-                // 绝不把超大文件读进内存，也不触发任何 GitHub API 调用。
-                val incoming = readLimited(dataSocket.getInputStream(), GitRepository.MAX_FILE_SIZE)
-                    ?: run {
-                        dataSocket.close()
-                        reply(552, "文件超过 ${GitRepository.MAX_FILE_SIZE / 1024 / 1024}MB 上限")
-                        return
-                    }
-                LogBus.info("FTP 收到上传数据 ${incoming.size} 字节 → $path")
-                val finalBytes = if (append && repo.exists(path)) {
-                    repo.read(path) + incoming
+                if (append && repo.exists(path)) {
+                    // APPE / 断点续传：需要先读已有内容再合并，只能内存路径。
+                    // （GitHub Contents API 不支持服务端追加，仍保持原语义）
+                    val incoming = readLimited(dataSocket.getInputStream(), GitRepository.MAX_FILE_SIZE)
+                        ?: run {
+                            dataSocket.close()
+                            reply(552, "文件超过 ${GitRepository.MAX_FILE_SIZE / 1024 / 1024}MB 上限")
+                            return
+                        }
+                    LogBus.info("FTP 收到上传数据 ${incoming.size} 字节（APPE）→ $path")
+                    val finalBytes = repo.read(path) + incoming
+                    repo.write(path, finalBytes)
+                    LogBus.info("FTP 上传已写入 GitHub：$path（${finalBytes.size} 字节）")
+                    dataSocket.close()
+                    reply(226, "上传完成")
                 } else {
-                    incoming
+                    // 常规 STOR：流式转发——数据连接收到的字节边收边 base64 推给 GitHub
+                    // （chunked），FTP 客户端的进度被 GitHub 公网真实上传速度拖住，
+                    // 不再出现“客户端 100% 但 GitHub 才开始传”的假完成。
+                    LogBus.info("FTP 流式上传开始 → $path")
+                    val node = repo.writeStream(path, dataSocket.getInputStream())
+                    LogBus.info("FTP 上传已写入 GitHub：$path（${node.size} 字节）")
+                    dataSocket.close()
+                    reply(226, "上传完成")
                 }
-                repo.write(path, finalBytes)
-                LogBus.info("FTP 上传已写入 GitHub：$path（${finalBytes.size} 字节）")
-                dataSocket.close()
-                reply(226, "上传完成")
             } catch (e: OutOfMemoryError) {
                 LogBus.error("上传内存不足：${e.message}")
                 try {

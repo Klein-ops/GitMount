@@ -268,6 +268,36 @@ class GitRepository(
         }
     }
 
+    /**
+     * 流式写入文件（创建或覆盖）：直接读输入流产线转发给 GitHub，不把整个文件驻留内存。
+     *
+     * 用于 FTP 上传：数据连接收到的字节边收边 base64 发往 GitHub（chunked），
+     * FTP 客户端的进度会被 GitHub 公网真实上传速度拖住，
+     * 消除"客户端 100% 但 GitHub 才刚开始传"的假完成。
+     *
+     * @param input 上传数据流；调用方需配置 soTimeout，read 空闲超时（SocketTimeoutException）
+     *              视为数据已发完（与 readLimited 的 DATA_IDLE_TIMEOUT 语义一致）。
+     */
+    fun writeStream(path: String, input: java.io.InputStream, commitMessage: String? = null): VfsNode {
+        reclaimIfIdle()
+        val norm = normalize(path)
+        if (norm == "/") throw IOException("不能写入根目录")
+        // 与 write 同一把锁：串行化写阶段，避免并发上传叠加内存峰值 / GitHub 409
+        writeLock.lock()
+        return try {
+            ensureParentDirs(norm)
+            val gitPath = toGitPath(norm)
+            val existing = client.getFileMeta(owner, repo, gitPath, branch)
+            val msg = commitMessage ?: if (existing == null) "上传 ${nameOf(norm)}" else "更新 ${nameOf(norm)}"
+            val meta = client.putFileStream(owner, repo, gitPath, input, existing?.sha, msg, branch)
+            invalidate(parentOf(norm))
+            invalidate(norm)
+            VfsNode(nameOf(norm), norm, false, meta.size, meta.sha)
+        } finally {
+            writeLock.unlock()
+        }
+    }
+
     /** 创建目录：GitHub 无空目录，用 .gitkeep 占位 */
     fun createDirectory(path: String) {
         reclaimIfIdle()
