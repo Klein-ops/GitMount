@@ -245,12 +245,12 @@ class GitHubClient(private val token: String) {
         }
     }
 
-    /** 创建私有仓库（auto_init 生成默认分支，便于 Contents API 直接写入） */
-    fun createPrivateRepo(name: String, description: String = "GitMount 托管的私有数据仓库") {
+    /** 创建仓库（auto_init 生成默认分支，便于 Contents API 直接写入） */
+    fun createRepo(name: String, isPrivate: Boolean, description: String? = null) {
         val payload = JSONObject()
             .put("name", name)
-            .put("description", description)
-            .put("private", true)
+            .put("description", description ?: if (isPrivate) "GitMount 托管的私有数据仓库" else "GitMount 托管的数据仓库")
+            .put("private", isPrivate)
             .put("auto_init", true)
         execute(
             authRequest(url("/user/repos"))

@@ -34,8 +34,10 @@ data class AppSettings(
     val password: String = "",
     /** true = 服务只监听 127.0.0.1，仅本机可访问，不暴露局域网 */
     val loopbackOnly: Boolean = false,
-    /** true = 隐藏前台服务常驻通知（改用静默渠道），降低后台存在感 */
-    val hideNotification: Boolean = false,
+    /** true = 隐藏前台服务常驻通知（改用静默渠道）。默认 true：常驻通知默认关闭 */
+    val hideNotification: Boolean = true,
+    /** true = 从最近任务列表隐藏本应用（后台运行时在任务切换界面不可见） */
+    val hideFromRecents: Boolean = false,
     /** true = 打开 App 时自动启动服务（需已配置仓库） */
     val autoStart: Boolean = true,
 ) {
@@ -103,6 +105,7 @@ class SettingsRepository(private val context: Context) {
         val PASSWORD = stringPreferencesKey("password")
         val LOOPBACK_ONLY = booleanPreferencesKey("loopback_only")
         val HIDE_NOTIFICATION = booleanPreferencesKey("hide_notification")
+        val HIDE_FROM_RECENTS = booleanPreferencesKey("hide_from_recents")
         val AUTO_START = booleanPreferencesKey("auto_start")
     }
 
@@ -118,7 +121,8 @@ class SettingsRepository(private val context: Context) {
             username = p[Keys.USERNAME] ?: "gitmount",
             password = p[Keys.PASSWORD] ?: "",
             loopbackOnly = p[Keys.LOOPBACK_ONLY] ?: false,
-            hideNotification = p[Keys.HIDE_NOTIFICATION] ?: false,
+            hideNotification = p[Keys.HIDE_NOTIFICATION] ?: true,
+            hideFromRecents = p[Keys.HIDE_FROM_RECENTS] ?: false,
             autoStart = p[Keys.AUTO_START] ?: true,
         )
     }
@@ -141,6 +145,7 @@ class SettingsRepository(private val context: Context) {
         loopbackOnly: Boolean,
         hideNotification: Boolean,
         autoStart: Boolean,
+        hideFromRecents: Boolean = false,
     ) {
         context.dataStore.edit { p ->
             p[Keys.MODE] = mode
@@ -150,6 +155,7 @@ class SettingsRepository(private val context: Context) {
             p[Keys.PASSWORD] = password
             p[Keys.LOOPBACK_ONLY] = loopbackOnly
             p[Keys.HIDE_NOTIFICATION] = hideNotification
+            p[Keys.HIDE_FROM_RECENTS] = hideFromRecents
             p[Keys.AUTO_START] = autoStart
         }
     }

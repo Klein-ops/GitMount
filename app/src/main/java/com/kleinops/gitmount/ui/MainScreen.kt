@@ -3,8 +3,6 @@ package com.kleinops.gitmount.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
-import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -20,6 +18,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
@@ -42,7 +41,6 @@ import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -60,14 +58,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.kleinops.gitmount.R
 import com.kleinops.gitmount.data.ServerMode
 import com.kleinops.gitmount.service.MountService
 import com.kleinops.gitmount.ui.components.ClickableInfoRow
@@ -92,9 +88,18 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
     val scanState by vm.scanState.collectAsStateWithLifecycle()
     val repoOpState by vm.repoOpState.collectAsStateWithLifecycle()
 
-    var showRepoSetup by remember { mutableStateOf(false) }
-    var showServerSetup by remember { mutableStateOf(false) }
+    var showRepoList by remember { mutableStateOf(false) }
+    var showCreateRepo by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
     var showClearHistoryConfirm by remember { mutableStateOf(false) }
+    /** 从仓库列表跳转新建时带入的令牌（可能尚未保存到 DataStore） */
+    var createRepoToken by remember { mutableStateOf("") }
+
+    // 设置页独立成页面（不再用对话框），返回后回到主界面
+    if (showSettings) {
+        SettingsScreen(vm = vm, onBack = { showSettings = false })
+        return
+    }
 
     // 已配置仓库时，进入主界面自动查一次容量（后续可手动刷新）
     LaunchedEffect(settings.isConfigured) {
@@ -125,7 +130,8 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
     LaunchedEffect(setupState) {
         if (setupState is SetupState.Success) {
             val message = (setupState as SetupState.Success).message
-            showRepoSetup = false
+            showRepoList = false
+            showCreateRepo = false
             vm.clearSetupMessage()
             snackbar.showSnackbar(message)
         }
@@ -146,8 +152,8 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                     }
                 },
                 actions = {
-                    IconButton(onClick = { showRepoSetup = true }) {
-                        Icon(Icons.Filled.Settings, contentDescription = "仓库配置")
+                    IconButton(onClick = { showSettings = true }) {
+                        Icon(Icons.Filled.Settings, contentDescription = "设置")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -257,8 +263,9 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                                     val mode = runCatching { ServerMode.valueOf(settings.mode) }
                                         .getOrDefault(ServerMode.WEBDAV)
                                     if (!settings.isConfigured) {
-                                        scope.launch { snackbar.showSnackbar("请先完成仓库配置") }
-                                        showRepoSetup = true
+                                        scope.launch { snackbar.showSnackbar("请先绑定一个仓库") }
+                                        showRepoList = true
+                                        vm.scanRepos(settings.token.ifBlank { "" })
                                     } else {
                                         MountService.start(context, mode, port)
                                     }
@@ -281,26 +288,29 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                             }
                         }
                     }
-                    // 第二行：仓库配置 / 服务设置均分宽度，每个都带图标，风格与启动按钮一致
+                    // 第二行：仓库 / 设置，各自打开对应页面（仓库配置已改为仓库列表）
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         FilledTonalButton(
-                            onClick = { showRepoSetup = true },
+                            onClick = {
+                                showRepoList = true
+                                vm.scanRepos(settings.token.ifBlank { "" })
+                            },
                             modifier = Modifier.weight(1f),
                         ) {
                             Icon(Icons.Filled.Cloud, contentDescription = null, modifier = Modifier.width(18.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("仓库配置", maxLines = 1)
+                            Text("仓库", maxLines = 1)
                         }
                         FilledTonalButton(
-                            onClick = { showServerSetup = true },
+                            onClick = { showSettings = true },
                             modifier = Modifier.weight(1f),
                         ) {
                             Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.width(18.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("服务设置", maxLines = 1)
+                            Text("设置", maxLines = 1)
                         }
                     }
                 }
@@ -442,36 +452,40 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
         }
     }
 
-    if (showRepoSetup) {
-        RepoSetupDialog(
+    if (showRepoList) {
+        RepoListDialog(
             vm = vm,
             initialToken = settings.token,
-            initialOwner = settings.owner,
-            initialRepo = settings.repoName,
-            initialBranch = settings.branch,
-            isWorking = setupState is SetupState.Working,
+            currentOwner = settings.owner,
+            currentRepo = settings.repoName,
             scanState = scanState,
             setupState = setupState,
+            onBind = { token, owner, name, branch ->
+                vm.bindRepo(token, owner, name, branch)
+            },
+            onCreateNew = { token ->
+                createRepoToken = token
+                showCreateRepo = true
+            },
+            onRefresh = { token -> vm.scanRepos(token) },
             onDismiss = {
-                showRepoSetup = false
+                showRepoList = false
                 vm.clearSetupMessage()
                 vm.clearScanState()
             },
         )
     }
 
-    if (showServerSetup) {
-        ServerSetupDialog(
+    if (showCreateRepo) {
+        CreateRepoDialog(
             vm = vm,
-            initialMode = runCatching { ServerMode.valueOf(settings.mode) }.getOrDefault(ServerMode.WEBDAV),
-            initialFtpPort = settings.ftpPort.toString(),
-            initialWebdavPort = settings.webdavPort.toString(),
-            initialUsername = settings.username,
-            initialPassword = settings.password,
-            initialLoopbackOnly = settings.loopbackOnly,
-            initialHideNotification = settings.hideNotification,
-            initialAutoStart = settings.autoStart,
-            onDismiss = { showServerSetup = false },
+            initialToken = createRepoToken.ifBlank { settings.token },
+            isWorking = setupState is SetupState.Working,
+            setupState = setupState,
+            onDismiss = {
+                showCreateRepo = false
+                vm.clearSetupMessage()
+            },
         )
     }
 
@@ -517,53 +531,42 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
     }
 }
 
-/** 仓库配置对话框：令牌 → 扫描仓库 → 绑定已有 / 创建新仓库 */
+/**
+ * 仓库列表对话框：输入令牌 → 扫描 → 点选仓库即绑定。
+ * 与旧版「仓库配置」的区别：不再手动填 owner/仓库名，全部从列表点选；
+ * 新建走独立入口（onCreateNew 带出当前令牌）。
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun RepoSetupDialog(
+private fun RepoListDialog(
     vm: MainViewModel,
     initialToken: String,
-    initialOwner: String,
-    initialRepo: String,
-    initialBranch: String,
-    isWorking: Boolean,
+    currentOwner: String,
+    currentRepo: String,
     scanState: ScanState,
     setupState: SetupState,
+    onBind: (token: String, owner: String, name: String, branch: String) -> Unit,
+    onCreateNew: (token: String) -> Unit,
+    onRefresh: (token: String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var token by remember { mutableStateOf(initialToken) }
-    var owner by remember { mutableStateOf(initialOwner) }
-    var repo by remember { mutableStateOf(initialRepo) }
-    var branch by remember { mutableStateOf(initialBranch.ifBlank { "main" }) }
     var showToken by remember { mutableStateOf(false) }
-
-    // 判定：owner/repo 与某个已配置/扫描到的仓库匹配 → 绑定已有仓库；否则创建新仓库。
-    // 注意要兼容两种情况：
-    //  1) 已保存过配置，用户只是重开对话框改设置 → 默认按“绑定”处理，避免误显示“创建”。
-    //  2) 通过“扫描我的仓库”选中 → 按“绑定”处理。
-    val selectedRepo = (scanState as? ScanState.Success)
-        ?.repos
-        ?.firstOrNull { it.fullName.equals("${owner.trim()}/${repo.trim()}", ignoreCase = true) }
-    val keepsExisting = initialRepo.isNotBlank() &&
-        repo.trim().equals(initialRepo.trim(), ignoreCase = true) &&
-        owner.trim().equals(initialOwner.trim(), ignoreCase = true)
-    val isBinding = selectedRepo != null || keepsExisting
+    val working = setupState is SetupState.Working
 
     AlertDialog(
-        onDismissRequest = { if (!isWorking) onDismiss() },
-        title = { Text("仓库配置") },
+        onDismissRequest = { if (!working) onDismiss() },
+        title = { Text("仓库") },
         text = {
-            // 注意：AlertDialog 的 text 槽位高度有界，直接放 LazyColumn 会因约束冲突崩溃。
-            // 这里用带高度上限的可滚动 Column 替代。
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 460.dp)
+                    .heightIn(max = 480.dp)
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Text(
-                    "GitHub 访问令牌 *",
+                    "GitHub 访问令牌",
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
@@ -583,25 +586,18 @@ private fun RepoSetupDialog(
                             )
                         }
                     },
-                    supportingText = {
-                        Text(
-                            "需 repo 权限（classic 令牌）或 Contents 读写权限（fine-grained 令牌）",
-                            style = MaterialTheme.typography.labelSmall,
-                        )
-                    },
                 )
 
-                // 扫描并选择已有仓库
                 TextButton(
-                    onClick = { vm.scanRepos(token) },
-                    enabled = !isWorking && scanState !is ScanState.Working,
+                    onClick = { onRefresh(token) },
+                    enabled = !working && scanState !is ScanState.Working,
                 ) {
                     if (scanState is ScanState.Working) {
                         CircularProgressIndicator(modifier = Modifier.width(14.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(8.dp))
                         Text("扫描中…")
                     } else {
-                        Text("扫描我的仓库（绑定已有）")
+                        Text("扫描我的仓库")
                     }
                 }
 
@@ -614,7 +610,7 @@ private fun RepoSetupDialog(
                     )
                     is ScanState.Success -> {
                         Text(
-                            "账号 ${s.login}，共 ${s.repos.size} 个仓库。点击下方仓库即可选中绑定；也可以在下方面板输入新仓库名来创建。",
+                            "账号 ${s.login}，共 ${s.repos.size} 个仓库。点击仓库即绑定。",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -622,23 +618,28 @@ private fun RepoSetupDialog(
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .heightIn(max = 160.dp)
+                                    .heightIn(max = 220.dp)
                                     .verticalScroll(rememberScrollState()),
                                 verticalArrangement = Arrangement.spacedBy(4.dp),
                             ) {
                                 s.repos.forEach { r ->
                                     val full = r.fullName
-                                    val isSel = full.equals("${owner.trim()}/${repo.trim()}", ignoreCase = true)
-                                    // 列表项：用 Surface 呈现可点击行，选中态高亮 + 对勾，而非一竖排按钮。
+                                    val isCurrent = full.equals(
+                                        "${currentOwner.trim()}/${currentRepo.trim()}",
+                                        ignoreCase = true,
+                                    )
                                     Surface(
                                         onClick = {
-                                            owner = full.substringBefore('/')
-                                            repo = r.name
-                                            branch = r.defaultBranch
+                                            onBind(
+                                                token.trim(),
+                                                full.substringBefore('/'),
+                                                r.name,
+                                                r.defaultBranch,
+                                            )
                                         },
                                         modifier = Modifier.fillMaxWidth(),
                                         shape = MaterialTheme.shapes.small,
-                                        color = if (isSel) MaterialTheme.colorScheme.secondaryContainer
+                                        color = if (isCurrent) MaterialTheme.colorScheme.secondaryContainer
                                         else MaterialTheme.colorScheme.surfaceVariant,
                                     ) {
                                         Row(
@@ -648,7 +649,7 @@ private fun RepoSetupDialog(
                                             verticalAlignment = Alignment.CenterVertically,
                                         ) {
                                             Text(
-                                                if (isSel) "✓ " else "  ",
+                                                if (isCurrent) "✓ " else "  ",
                                                 color = MaterialTheme.colorScheme.primary,
                                                 style = MaterialTheme.typography.bodyMedium,
                                             )
@@ -659,7 +660,8 @@ private fun RepoSetupDialog(
                                                     style = MaterialTheme.typography.bodyMedium,
                                                 )
                                                 Text(
-                                                    "默认分支 ${r.defaultBranch}",
+                                                    "默认分支 ${r.defaultBranch}" +
+                                                        if (isCurrent) "（当前）" else "",
                                                     style = MaterialTheme.typography.labelSmall,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                 )
@@ -668,46 +670,130 @@ private fun RepoSetupDialog(
                                     }
                                 }
                             }
+                        } else {
+                            Text(
+                                "没有可绑定的仓库，可点下方「新建仓库」创建",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
-                    ScanState.Idle -> Unit
+                    ScanState.Idle -> Text(
+                        "点击上方「扫描我的仓库」列出账号名下的仓库，点选即绑定。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
 
-                Spacer(Modifier.height(4.dp))
-                Text("仓库（绑定已有或创建新仓库）", style = MaterialTheme.typography.labelLarge)
-                OutlinedTextField(
-                    value = owner,
-                    onValueChange = { owner = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("所有者（创建时可留空，默认令牌账号）") },
-                )
-                OutlinedTextField(
-                    value = repo,
-                    onValueChange = { repo = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("仓库名称 *") },
-                    placeholder = { Text("gitmount-data") },
-                )
-                OutlinedTextField(
-                    value = branch,
-                    onValueChange = { branch = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("分支（绑定已有时自动填入）") },
-                )
-                Text(
-                    if (isBinding) "将绑定已有私有仓库：${owner.trim()}/${repo.trim()}"
-                    else "将创建新的私有仓库：${owner.trim()}/${repo.trim()}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (isBinding) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary,
-                )
-
-                // 初始化失败：直接显示在对话框内部，避免被对话框遮挡看不到
                 if (setupState is SetupState.Error) {
                     Text(
-                        "保存失败：${(setupState as SetupState.Error).message}",
+                        "操作失败：${(setupState as SetupState.Error).message}",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+
+                Button(
+                    onClick = { onCreateNew(token.trim()) },
+                    enabled = !working,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.width(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("新建仓库")
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss, enabled = !working) { Text("完成") }
+        },
+    )
+}
+
+/**
+ * 新建仓库对话框：填仓库名 + 选择公开/私有，创建成功后自动绑定。
+ * 走与「绑定已有仓库」完全相同的保存链路（createAndBindRepo）。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CreateRepoDialog(
+    vm: MainViewModel,
+    initialToken: String,
+    isWorking: Boolean,
+    setupState: SetupState,
+    onDismiss: () -> Unit,
+) {
+    var token by remember { mutableStateOf(initialToken) }
+    var name by remember { mutableStateOf("") }
+    var isPrivate by remember { mutableStateOf(true) }
+    var showToken by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = { if (!isWorking) onDismiss() },
+        title = { Text("新建仓库") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    "GitHub 访问令牌",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                OutlinedTextField(
+                    value = token,
+                    onValueChange = { token = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    placeholder = { Text("ghp_… 或 github_pat_…") },
+                    visualTransformation = if (showToken) VisualTransformation.None else PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    trailingIcon = {
+                        IconButton(onClick = { showToken = !showToken }) {
+                            Icon(
+                                if (showToken) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = if (showToken) "隐藏令牌" else "显示令牌",
+                            )
+                        }
+                    },
+                )
+
+                Text("仓库名称", style = MaterialTheme.typography.labelLarge)
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    placeholder = { Text("如 gitmount-data") },
+                )
+
+                Text("可见性", style = MaterialTheme.typography.labelLarge)
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    SegmentedButton(
+                        selected = isPrivate,
+                        onClick = { isPrivate = true },
+                        shape = SegmentedButtonDefaults.itemShape(0, 2),
+                    ) { Text("私有") }
+                    SegmentedButton(
+                        selected = !isPrivate,
+                        onClick = { isPrivate = false },
+                        shape = SegmentedButtonDefaults.itemShape(1, 2),
+                    ) { Text("公开") }
+                }
+                Text(
+                    if (isPrivate) "私有仓库：仅自己和受邀协作者可见，免费额度 500MB"
+                    else "公开仓库：所有人可见，无存储配额上限",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                if (setupState is SetupState.Error) {
+                    Text(
+                        "创建失败：${(setupState as SetupState.Error).message}",
                         color = MaterialTheme.colorScheme.error,
                         style = MaterialTheme.typography.bodyMedium,
                     )
@@ -716,10 +802,8 @@ private fun RepoSetupDialog(
         },
         confirmButton = {
             Button(
-                enabled = !isWorking,
-                onClick = {
-                    vm.setupRepo(token, owner, repo, branch, createNew = !isBinding)
-                },
+                enabled = !isWorking && name.isNotBlank() && token.isNotBlank(),
+                onClick = { vm.createAndBindRepo(token.trim(), name.trim(), isPrivate) },
             ) {
                 if (isWorking) {
                     CircularProgressIndicator(
@@ -729,249 +813,11 @@ private fun RepoSetupDialog(
                     )
                     Spacer(Modifier.width(8.dp))
                 }
-                Text(
-                    when {
-                        isWorking -> "处理中…"
-                        isBinding -> "绑定并保存"
-                        else -> "创建并保存"
-                    }
-                )
+                Text(if (isWorking) "创建中…" else "创建并绑定")
             }
         },
         dismissButton = {
             TextButton(onClick = onDismiss, enabled = !isWorking) { Text("取消") }
-        },
-    )
-}
-
-/** 服务设置对话框：协议 / 端口 / 访问账号 / 仅本机访问 */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun ServerSetupDialog(
-    vm: MainViewModel,
-    initialMode: ServerMode,
-    initialFtpPort: String,
-    initialWebdavPort: String,
-    initialUsername: String,
-    initialPassword: String,
-    initialLoopbackOnly: Boolean,
-    initialHideNotification: Boolean,
-    initialAutoStart: Boolean,
-    onDismiss: () -> Unit,
-) {
-    var mode by remember { mutableStateOf(initialMode) }
-    var ftpPort by remember { mutableStateOf(initialFtpPort) }
-    var webdavPort by remember { mutableStateOf(initialWebdavPort) }
-    var username by remember { mutableStateOf(initialUsername) }
-    var password by remember { mutableStateOf(initialPassword) }
-    var loopbackOnly by remember { mutableStateOf(initialLoopbackOnly) }
-    var hideNotification by remember { mutableStateOf(initialHideNotification) }
-    var autoStart by remember { mutableStateOf(initialAutoStart) }
-    var showPassword by remember { mutableStateOf(false) }
-    var saving by remember { mutableStateOf(false) }
-    val context = LocalContext.current
-
-    // 打开电池优化白名单：
-    // 1) 优先 ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS——直接弹针对本应用的
-    //    “允许/不允许”系统对话框（最直接有效，需要 REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 权限）；
-    // 2) 失败降级到“全部应用”列表页；
-    // 3) 再失败用 Toast 明确提示，绝不静默吞掉（用户之前反馈“点了没反应”就是静默吞异常导致）。
-    fun openBatterySettings() {
-        runCatching {
-            context.startActivity(
-                Intent(
-                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                    android.net.Uri.parse("package:${context.packageName}"),
-                )
-            )
-        }.onFailure {
-            runCatching {
-                context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-            }.onFailure {
-                android.widget.Toast.makeText(
-                    context,
-                    context.getString(R.string.settings_bg_battery_err),
-                    android.widget.Toast.LENGTH_SHORT,
-                ).show()
-            }
-        }
-    }
-
-    AlertDialog(
-        onDismissRequest = { if (!saving) onDismiss() },
-        title = { Text("服务设置") },
-        text = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 460.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Text("协议", style = MaterialTheme.typography.labelLarge)
-                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                    ServerMode.entries.forEachIndexed { index, m ->
-                        SegmentedButton(
-                            selected = mode == m,
-                            onClick = { mode = m },
-                            shape = SegmentedButtonDefaults.itemShape(index, ServerMode.entries.size),
-                        ) {
-                            Text(m.label)
-                        }
-                    }
-                }
-
-                OutlinedTextField(
-                    value = if (mode == ServerMode.FTP) ftpPort else webdavPort,
-                    onValueChange = {
-                        if (mode == ServerMode.FTP) ftpPort = it else webdavPort = it
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("端口") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    supportingText = {
-                        Text(
-                            if (mode == ServerMode.FTP) "建议 2121（1024 以上免 root）" else "建议 8080",
-                            style = MaterialTheme.typography.labelSmall,
-                        )
-                    },
-                )
-                OutlinedTextField(
-                    value = username,
-                    onValueChange = { username = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("访问用户名（可选）") },
-                )
-                OutlinedTextField(
-                    value = password,
-                    onValueChange = { password = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("访问密码（可选）") },
-                    visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                    trailingIcon = {
-                        IconButton(onClick = { showPassword = !showPassword }) {
-                            Icon(
-                                if (showPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                                contentDescription = if (showPassword) "隐藏密码" else "显示密码",
-                            )
-                        }
-                    },
-                    supportingText = {
-                        Text(
-                            "仅用于局域网访问认证，可与 GitHub 令牌不同",
-                            style = MaterialTheme.typography.labelSmall,
-                        )
-                    },
-                )
-
-                // 仅本机访问开关
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("仅本机访问", style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            "开启后只监听 127.0.0.1，局域网内其他设备无法访问，更安全",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Switch(
-                        checked = loopbackOnly,
-                        onCheckedChange = { loopbackOnly = it },
-                    )
-                }
-
-                // 后台运行：隐藏常驻通知 + 电池优化白名单引导
-                Spacer(Modifier.height(4.dp))
-                Text("后台运行", style = MaterialTheme.typography.labelLarge)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(stringResource(R.string.settings_bg_hide_notif), style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            stringResource(R.string.settings_bg_hide_notif_desc),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Switch(
-                        checked = hideNotification,
-                        onCheckedChange = { hideNotification = it },
-                    )
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(stringResource(R.string.settings_bg_battery), style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            stringResource(R.string.settings_bg_battery_desc),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    TextButton(
-                        onClick = { openBatterySettings() },
-                    ) {
-                        Text(stringResource(R.string.settings_bg_battery_btn))
-                    }
-                }
-
-                // 打开应用时自动启动服务
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(stringResource(R.string.settings_bg_auto_start), style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            stringResource(R.string.settings_bg_auto_start_desc),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Switch(
-                        checked = autoStart,
-                        onCheckedChange = { autoStart = it },
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            Button(
-                enabled = !saving,
-                onClick = {
-                    saving = true
-                    vm.saveServerSettings(
-                        mode = mode,
-                        ftpPort = ftpPort.toIntOrNull() ?: 2121,
-                        webdavPort = webdavPort.toIntOrNull() ?: 8080,
-                        username = username.trim(),
-                        password = password,
-                        loopbackOnly = loopbackOnly,
-                        hideNotification = hideNotification,
-                        autoStart = autoStart,
-                    )
-                    onDismiss()
-                },
-            ) {
-                Text("保存")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !saving) { Text("取消") }
         },
     )
 }

@@ -12,8 +12,12 @@
 
     <!-- 后台保活设置 -->
     <string name="settings_bg_title">后台运行</string>
-    <string name="settings_bg_hide_notif">隐藏常驻通知</string>
-    <string name="settings_bg_hide_notif_desc">开启后顶部通知栏不再常驻显示服务状态，更省心；关闭服务需回到 App 操作</string>
+    <string name="settings_bg_hide_notif">常驻通知</string>
+    <string name="settings_bg_hide_notif_desc">开启后在通知栏显示服务状态；默认关闭，后台更安静</string>
+
+    <string name="settings_bg_hide_from_recents">后台隐藏（最近任务不可见）</string>
+    <string name="settings_bg_hide_from_recents_desc">开启后从最近任务列表隐藏本应用，切到后台时不出现在任务切换界面；从桌面图标仍可正常打开</string>
+
     <string name="settings_bg_battery">电池优化白名单</string>
     <string name="settings_bg_battery_desc">跳转到系统设置，将 GitMount 设为「不优化」，防止系统在后台杀掉服务</string>
     <string name="settings_bg_battery_btn">前往设置</string>

@@ -172,63 +172,82 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 绑定或创建仓库并保存配置。
-     * @param createNew true = 创建新私有仓库；false = 绑定已有仓库（owner/repo 必须已存在）
+     * 绑定已有仓库（仓库必须已存在，走一套统一的保存逻辑）。
+     * @param token 用户输入的令牌（尚未保存时也能直接用）
      */
-    fun setupRepo(token: String, owner: String, repo: String, branch: String, createNew: Boolean) {
+    fun bindRepo(token: String, owner: String, repoName: String, branch: String = "") {
         val t = token.trim()
+        val o = owner.trim()
+        val r = repoName.trim()
         if (t.isBlank()) {
-            _setupState.value = SetupState.Error("请填写 GitHub 访问令牌")
+            _setupState.value = SetupState.Error("请先填写 GitHub 访问令牌")
             return
         }
-        if (repo.isBlank()) {
-            _setupState.value = SetupState.Error("请填写仓库名称")
+        if (o.isBlank() || r.isBlank()) {
+            _setupState.value = SetupState.Error("仓库信息不完整")
             return
         }
         _setupState.value = SetupState.Working
-        // OkHttp 同步调用必须在 IO 线程执行，避免 NetworkOnMainThreadException
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val client = GitHubClient(t)
-                if (createNew) {
-                    val login = client.getUser()
-                    if (login.isBlank()) throw IllegalStateException("令牌无效")
-                    val resolvedOwner = owner.ifBlank { login }.trim()
-                    // 兜底：若仓库已存在（用户手动输入了已有仓库名），自动切换为绑定，避免 422。
-                    val existing = client.getDefaultBranch(resolvedOwner, repo)
-                    if (existing != null) {
-                        LogBus.info("仓库已存在，自动切换为绑定：$resolvedOwner/$repo")
-                        settingsRepo.saveRepo(t, resolvedOwner, repo, existing)
-                        _setupState.value = SetupState.Success("已绑定：$resolvedOwner/$repo（$existing）")
-                        return@launch
-                    }
-                    LogBus.info("正在创建私有仓库 $resolvedOwner/$repo …")
-                    client.createPrivateRepo(repo)
-                    LogBus.info("私有仓库创建成功")
-                    // 关键：GitHub 账号的默认分支可能是 main 也可能是 master，
-                    // 不能想当然用 "main"，必须回读仓库真实的默认分支。
-                    val resolvedBranch = awaitDefaultBranch(client, resolvedOwner, repo)
-                        ?: branch.ifBlank { "main" }
-                    settingsRepo.saveRepo(t, resolvedOwner, repo, resolvedBranch)
-                    _setupState.value = SetupState.Success("已创建并绑定：$resolvedOwner/$repo（$resolvedBranch）")
-                } else {
-                    val resolvedOwner = owner.ifBlank { loginFallback(client) }.trim()
-                    val resolvedBranch = client.getDefaultBranch(resolvedOwner, repo)
-                        ?: throw GitHubApiException(404, "仓库 $resolvedOwner/$repo 不存在或无权访问")
-                    settingsRepo.saveRepo(t, resolvedOwner, repo, resolvedBranch)
-                    _setupState.value = SetupState.Success("已绑定：$resolvedOwner/$repo（$resolvedBranch）")
+                // 用 token 校验一次并拿到真实默认分支，避免存错分支导致后续全部读写失败
+                val actualBranch = branch.ifBlank {
+                    val b = GitHubClient(t).getDefaultBranch(o, r)
+                    b ?: throw GitHubApiException(404, "仓库 $o/$r 不存在或无权访问")
                 }
+                settingsRepo.saveRepo(t, o, r, actualBranch)
+                LogBus.info("已绑定仓库 $o/$r（$actualBranch）")
+                _setupState.value = SetupState.Success("已绑定：$o/$r（$actualBranch）")
             } catch (e: Exception) {
                 val msg = friendly(e)
-                LogBus.error("初始化失败：$msg")
+                LogBus.error("绑定失败：$msg")
                 _setupState.value = SetupState.Error(msg)
             }
         }
     }
 
-    private fun loginFallback(client: GitHubClient): String {
-        val login = runCatching { client.getUser() }.getOrNull()
-        return if (login.isNullOrBlank()) "owner" else login
+    /**
+     * 新建仓库并立即绑定（创建完成后走与绑定完全相同的保存逻辑）。
+     * @param token 用户输入的令牌（尚未保存时也能直接用）
+     * @param isPrivate true = 私有，false = 公开
+     */
+    fun createAndBindRepo(token: String, name: String, isPrivate: Boolean) {
+        val t = token.trim()
+        val repoName = name.trim()
+        if (t.isBlank()) {
+            _setupState.value = SetupState.Error("请先填写 GitHub 访问令牌")
+            return
+        }
+        if (repoName.isBlank()) {
+            _setupState.value = SetupState.Error("请填写仓库名称")
+            return
+        }
+        _setupState.value = SetupState.Working
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val client = GitHubClient(t)
+                val login = client.getUser()
+                if (login.isBlank()) throw IllegalStateException("令牌无效")
+                LogBus.info("正在创建${if (isPrivate) "私有" else "公开"}仓库 $login/$repoName …")
+                client.createRepo(repoName, isPrivate)
+                LogBus.info("仓库创建成功，读取默认分支…")
+                // 新建仓库后 GitHub 可能短暂 404（auto_init 尚未完成），重试几次
+                val resolvedBranch = awaitDefaultBranch(client, login, repoName) ?: "main"
+                settingsRepo.saveRepo(t, login, repoName, resolvedBranch)
+                // 创建后立刻刷新列表，让新仓库出现在仓库列表里
+                runCatching { client.listUserRepos() }.getOrNull()?.let { repos ->
+                    scanCache = ScanCache(t, login, repos, System.currentTimeMillis())
+                    _scanState.value = ScanState.Success(login, repos)
+                }
+                _setupState.value = SetupState.Success(
+                    "已创建并绑定：$login/$repoName（${if (isPrivate) "私有" else "公开"}，$resolvedBranch）"
+                )
+            } catch (e: Exception) {
+                val msg = friendly(e)
+                LogBus.error("创建仓库失败：$msg")
+                _setupState.value = SetupState.Error(msg)
+            }
+        }
     }
 
     fun saveServerSettings(
@@ -240,13 +259,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         loopbackOnly: Boolean,
         hideNotification: Boolean,
         autoStart: Boolean,
+        hideFromRecents: Boolean,
     ) {
         if (username.isBlank() || password.isBlank()) {
             LogBus.warn("访问账号或密码为空，服务启动后无法登录")
         }
         viewModelScope.launch {
-            settingsRepo.saveServer(mode.name, ftpPort, webdavPort, username, password, loopbackOnly, hideNotification, autoStart)
-            LogBus.info("服务设置已保存：${mode.label} / 端口 ${if (mode == ServerMode.FTP) ftpPort else webdavPort} / ${if (loopbackOnly) "仅本机" else "局域网"} / ${if (hideNotification) "隐藏通知" else "常驻通知"} / ${if (autoStart) "自启动开" else "自启动关"}")
+            settingsRepo.saveServer(
+                mode.name, ftpPort, webdavPort, username, password,
+                loopbackOnly, hideNotification, autoStart, hideFromRecents,
+            )
+            LogBus.info(
+                "服务设置已保存：${mode.label} / 端口 ${if (mode == ServerMode.FTP) ftpPort else webdavPort} / " +
+                    "${if (loopbackOnly) "仅本机" else "局域网"} / " +
+                    "${if (hideNotification) "隐藏通知" else "常驻通知"} / " +
+                    "${if (hideFromRecents) "后台隐藏" else "任务列表可见"} / " +
+                    "${if (autoStart) "自启动开" else "自启动关"}"
+            )
         }
     }
 
