@@ -523,7 +523,7 @@ class FtpServer(
                     val incoming = readLimited(dataSocket.getInputStream(), GitRepository.MAX_FILE_SIZE)
                         ?: run {
                             dataSocket.close()
-                            reply(552, "文件超过 ${GitRepository.MAX_FILE_SIZE / 1024 / 1024}MB 上限")
+                            reply(552, "文件超过 ${GitRepository.MAX_FILE_SIZE / 1000 / 1000}MB 上限")
                             return
                         }
                     LogBus.info("FTP 收到上传数据 ${incoming.size} 字节（APPE）→ $path")
@@ -542,6 +542,14 @@ class FtpServer(
                     dataSocket.close()
                     reply(226, "上传完成")
                 }
+            } catch (e: com.kleinops.gitmount.data.FileTooLargeException) {
+                // 本地拦截：不用等 GitHub 返回 422，直接拒绝并告知上限
+                LogBus.warn("FTP 上传被本地拦截（超限）：$path → ${e.message}")
+                try {
+                    dataSocket.close()
+                } catch (_: IOException) {
+                }
+                reply(552, "文件超过 ${GitRepository.MAX_FILE_SIZE / 1000 / 1000}MB 上限，已本地拒绝（GitHub 不接受）")
             } catch (e: OutOfMemoryError) {
                 LogBus.error("上传内存不足：${e.message}")
                 try {

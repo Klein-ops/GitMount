@@ -15,6 +15,10 @@ import org.json.JSONObject
 /** GitHub API 异常（携带 HTTP 状态码，便于上层给出可读提示） */
 class GitHubApiException(val code: Int, detail: String) : IOException(detail)
 
+/** 本地拦截：上传超过单文件上限（避免把必然被 GitHub 拒绝的大文件发给它，省 API 调用） */
+class FileTooLargeException(val limit: Long) :
+    IOException("文件超过 ${limit / 1000 / 1000}MB 上限，GitHub Contents API 不支持（本地拦截）")
+
 /** 文件元信息（sha 用于更新/删除时的并发控制） */
 data class FileMeta(
     val sha: String,
@@ -382,7 +386,7 @@ class GitHubClient(private val token: String) {
         sha?.let { payload.put("sha", it) }
         val url = url("/repos/$owner/$repo/contents/${encodePath(path)}")
 
-        val body = StreamingBase64RequestBody(payload, "content", input)
+        val body = StreamingBase64RequestBody(payload, "content", input, GitRepository.MAX_FILE_SIZE)
         val resp = execute(
             authRequest(url).put(body)
         )
@@ -504,6 +508,8 @@ private class StreamingBase64RequestBody(
     private val payload: JSONObject,
     private val contentKey: String,
     private val input: java.io.InputStream,
+    /** 本地拦截阈值：流式上传无法预知总长度，转发时累计计数，超过立即抛异常掐断 */
+    private val maxBytes: Long,
 ) : RequestBody() {
 
     override fun contentType(): okhttp3.MediaType? =
@@ -517,6 +523,7 @@ private class StreamingBase64RequestBody(
         val chunk = 3072
         val buf = ByteArray(chunk)
         var filled = 0
+        var total = 0L
         while (true) {
             val n = try {
                 // 循环读直到填满 chunk 或 EOF：read() 不保证一次返回 len 字节
@@ -527,6 +534,12 @@ private class StreamingBase64RequestBody(
             }
             if (n < 0) break
             filled += n
+            total += n
+            if (total > maxBytes) {
+                // 已经超限：不再写 tail（请求体不成 JSON 也无所谓，会直接失败），
+                // 立即抛异常让 OkHttp 中止请求，避免继续把数据推给 GitHub
+                throw FileTooLargeException(maxBytes)
+            }
             if (filled == chunk) {
                 // 满一块：整块编码（无 padding），块边界严格 3072→4096
                 sink.writeUtf8(Base64.encodeToString(buf, Base64.NO_WRAP))

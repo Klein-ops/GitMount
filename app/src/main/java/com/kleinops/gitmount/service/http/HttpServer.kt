@@ -22,8 +22,9 @@ class HttpServer(
     private val handler: (HttpExchange) -> Unit,
     /** 绑定地址；null/0.0.0.0 = 监听所有网卡（局域网），127.0.0.1 = 仅本机 */
     private val bindAddress: String? = null,
-    /** 请求体上限：超过时在读 body 之前直接回 413，避免超大上传白白占用内存/带宽 */
-    private val maxBodyBytes: Long = 100L * 1024 * 1024,
+    /** 请求体上限：超过时在读 body 之前直接回 413，避免超大上传白白占用内存/带宽
+     *  与 GitRepository.MAX_FILE_SIZE（40MB 本地拦截线）保持一致 */
+    private val maxBodyBytes: Long = 40L * 1000 * 1000,
 ) {
     private val serverSocket = if (bindAddress == null) {
         ServerSocket(port)

@@ -40,10 +40,14 @@ class GitRepository(
         private const val CACHE_TTL_MS = 30_000L
 
         /**
-         * 单文件上限：GitHub Contents API 限制为 100MB（解码后）。
-         * 本地先拦截，避免把超大文件发到 GitHub 再被拒绝。
+         * 单文件上限：本地拦截阈值。
+         *
+         * 实测（2026-11-01，Klein-ops/api-streaming-test）：GitHub Contents API
+         * 原始字节上限约 40MiB（41.5MB 成功、40MiB-1 = 41,943,039B 已 422 拒绝），
+         * 远低于文档宣称的 100MB。这里取 40,000,000B（40MB）做保守本地拦截：
+         * 超过直接拒绝，不再把数据发给 GitHub 等它 422（省 API 调用、免白等）。
          */
-        const val MAX_FILE_SIZE = 100L * 1024 * 1024
+        const val MAX_FILE_SIZE = 40L * 1000 * 1000
 
         /** 文件内容缓存仅用于 ≤1MB 的小文件 */
         private const val FILE_CACHE_TTL_MS = 60_000L
@@ -249,7 +253,7 @@ class GitRepository(
         val norm = normalize(path)
         if (norm == "/") throw IOException("不能写入根目录")
         if (data.size > MAX_FILE_SIZE) {
-            throw IOException("文件超过 ${MAX_FILE_SIZE / 1024 / 1024}MB 上限，GitHub Contents API 不支持")
+            throw FileTooLargeException(MAX_FILE_SIZE)
         }
         // 串行化写阶段：并发大文件上传会叠加内存峰值并触发 GitHub 409，
         // 见 writeLock 注释。ReentrantLock 可重入，move/copy 递归调用 write 不会死锁。
