@@ -56,6 +56,14 @@ object ServerController {
         val error: String? = null,
         /** true = 仅监听本机回环，不暴露局域网 */
         val loopbackOnly: Boolean = false,
+        /** 当前活跃会话数（FTP 控制连接 + WebDAV 连接） */
+        val activeSessions: Int = 0,
+        /** 累计通过本服务传输的字节数（上传 + 下载，含目录列表/元数据请求体） */
+        val totalBytes: Long = 0L,
+        /** 累计上传字节数 */
+        val uploadedBytes: Long = 0L,
+        /** 累计下载字节数 */
+        val downloadedBytes: Long = 0L,
     ) {
         /** 局域网访问地址（仅非回环模式时存在） */
         val endpoint: String?
@@ -83,6 +91,29 @@ object ServerController {
 
     fun update(block: (State) -> State) {
         _state.update(block)
+    }
+
+    // ---------- 会话与流量统计（FTP/WebDAV 服务端打点） ----------
+
+    /** 会话开始（FTP 控制连接或 WebDAV 连接建立） */
+    fun sessionOpened() = update { it.copy(activeSessions = it.activeSessions + 1) }
+
+    /** 会话结束 */
+    fun sessionClosed() = update { it.copy(activeSessions = (it.activeSessions - 1).coerceAtLeast(0)) }
+
+    /** 累计传输字节（上传/下载分开计，同时累加总量） */
+    fun addTraffic(uploaded: Long, downloaded: Long) {
+        val u = uploaded.coerceAtLeast(0)
+        val d = downloaded.coerceAtLeast(0)
+        val total = u + d
+        if (total == 0L) return
+        update {
+            it.copy(
+                totalBytes = it.totalBytes + total,
+                uploadedBytes = it.uploadedBytes + u,
+                downloadedBytes = it.downloadedBytes + d,
+            )
+        }
     }
 
     fun reset() {

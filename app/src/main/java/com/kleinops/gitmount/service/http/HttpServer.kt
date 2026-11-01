@@ -1,5 +1,6 @@
 package com.kleinops.gitmount.service.http
 
+import com.kleinops.gitmount.service.ServerController
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
@@ -70,49 +71,56 @@ class HttpServer(
     }
 
     private fun handle(socket: Socket) {
-        socket.soTimeout = 60_000
-        BufferedInputStream(socket.getInputStream()).use { input ->
-            BufferedOutputStream(socket.getOutputStream()).use { output ->
-                var keepAlive = true
-                while (keepAlive && running.get() && !socket.isClosed) {
-                    val exchange = try {
-                        parseRequest(input)
-                    } catch (e: RequestTooLargeException) {
-                        // 超大上传：回 413 再断开，让客户端立刻知道被拒绝
+        ServerController.sessionOpened()
+        try {
+            socket.soTimeout = 60_000
+            BufferedInputStream(socket.getInputStream()).use { input ->
+                BufferedOutputStream(socket.getOutputStream()).use { output ->
+                    var keepAlive = true
+                    while (keepAlive && running.get() && !socket.isClosed) {
+                        val exchange = try {
+                            parseRequest(input)
+                        } catch (e: RequestTooLargeException) {
+                            // 超大上传：回 413 再断开，让客户端立刻知道被拒绝
+                            try {
+                                val err = HttpExchange("GET", "/", emptyMap(), ByteArray(0), false)
+                                err.status = 413
+                                err.bodyBytes = ("请求体超过 ${e.limit / 1024 / 1024}MB 上限").toByteArray()
+                                err.writeTo(output)
+                                output.flush()
+                            } catch (_: IOException) {
+                            }
+                            break
+                        } catch (e: IOException) {
+                            break
+                        } ?: break
+                        keepAlive = exchange.keepAlive
                         try {
-                            val err = HttpExchange("GET", "/", emptyMap(), ByteArray(0), false)
-                            err.status = 413
-                            err.bodyBytes = ("请求体超过 ${e.limit / 1024 / 1024}MB 上限").toByteArray()
-                            err.writeTo(output)
-                            output.flush()
-                        } catch (_: IOException) {
+                            handler(exchange)
+                            exchange.writeTo(output)
+                            // 流量打点：请求体=上传，响应体=下载（含目录列表/元数据等）
+                            ServerController.addTraffic(exchange.body.size.toLong(), exchange.bodyBytes.size.toLong())
+                        } catch (e: Exception) {
+                            // 处理器抛异常时回 500
+                            try {
+                                val err = HttpExchange(exchange.method, exchange.path, emptyMap(), ByteArray(0), false)
+                                err.status = 500
+                                err.bodyBytes = (e.message ?: "Internal Server Error").toByteArray()
+                                err.writeTo(output)
+                            } catch (_: IOException) {
+                            }
                         }
-                        break
-                    } catch (e: IOException) {
-                        break
-                    } ?: break
-                    keepAlive = exchange.keepAlive
-                    try {
-                        handler(exchange)
-                        exchange.writeTo(output)
-                    } catch (e: Exception) {
-                        // 处理器抛异常时回 500
-                        try {
-                            val err = HttpExchange(exchange.method, exchange.path, emptyMap(), ByteArray(0), false)
-                            err.status = 500
-                            err.bodyBytes = (e.message ?: "Internal Server Error").toByteArray()
-                            err.writeTo(output)
-                        } catch (_: IOException) {
-                        }
+                        output.flush()
+                        if (!exchange.keepAlive) break
                     }
-                    output.flush()
-                    if (!exchange.keepAlive) break
                 }
             }
-        }
-        try {
-            socket.close()
-        } catch (_: IOException) {
+        } finally {
+            try {
+                socket.close()
+            } catch (_: IOException) {
+            }
+            ServerController.sessionClosed()
         }
     }
 

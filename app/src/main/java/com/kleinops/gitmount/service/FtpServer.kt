@@ -65,7 +65,14 @@ class FtpServer(
             while (running.get()) {
                 try {
                     val socket = ss.accept()
-                    pool.execute { FtpSession(socket).run() }
+                    pool.execute {
+                        ServerController.sessionOpened()
+                        try {
+                            FtpSession(socket).run()
+                        } finally {
+                            ServerController.sessionClosed()
+                        }
+                    }
                 } catch (e: IOException) {
                     if (running.get()) logger("FTP accept 异常: ${e.message}")
                 }
@@ -454,6 +461,7 @@ class FtpServer(
                 out.write(sb.toString().toByteArray(StandardCharsets.UTF_8))
                 out.flush()
                 dataSocket.close()
+                ServerController.addTraffic(0, sb.length.toLong())
                 reply(226, "传输完成")
             } catch (e: IOException) {
                 reply(426, "连接中断：${e.message}")
@@ -502,6 +510,7 @@ class FtpServer(
                 out.write(bytes)
                 out.flush()
                 dataSocket.close()
+                ServerController.addTraffic(0, bytes.size.toLong())
                 reply(226, "下载完成")
             } catch (e: Exception) {
                 try {
@@ -535,6 +544,7 @@ class FtpServer(
                     repo.write(path, finalBytes)
                     LogBus.info("FTP 上传已写入 GitHub：$path（${finalBytes.size} 字节）")
                     dataSocket.close()
+                    ServerController.addTraffic(incoming.size.toLong(), 0)
                     reply(226, "上传完成")
                 } else {
                     // 常规 STOR：流式转发——数据连接收到的字节边收边 base64 推给 GitHub
@@ -544,6 +554,7 @@ class FtpServer(
                     val node = repo.writeStream(path, dataSocket.getInputStream())
                     LogBus.info("FTP 上传已写入 GitHub：$path（${node.size} 字节）")
                     dataSocket.close()
+                    ServerController.addTraffic(node.size, 0)
                     reply(226, "上传完成")
                 }
             } catch (e: com.kleinops.gitmount.data.FileTooLargeException) {

@@ -8,16 +8,21 @@ import android.app.Service
 import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.kleinops.gitmount.MainActivity
 import com.kleinops.gitmount.R
+import com.kleinops.gitmount.data.GitHubApiException
 import com.kleinops.gitmount.data.GitHubClient
 import com.kleinops.gitmount.data.GitRepository
 import com.kleinops.gitmount.data.ServerMode
 import com.kleinops.gitmount.data.SettingsRepository
 import com.kleinops.gitmount.service.http.HttpServer
+import java.net.BindException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -86,10 +91,72 @@ class MountService : Service() {
     @Volatile
     private var hiddenNotification = false
 
+    /** 网络变化监听：Wi-Fi 断开/重连、IP 变更时自动刷新通知里的端点地址 */
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
     override fun onCreate() {
         super.onCreate()
         settingsRepo = SettingsRepository(applicationContext)
         createChannel()
+        registerNetworkCallback()
+    }
+
+    override fun onDestroy() {
+        unregisterNetworkCallback()
+        shutdownServers()
+        scope.cancel()
+        super.onDestroy()
+    }
+
+    /** 注册网络监听：仅关心「当前是否有可用网络」与 IP 变化（用于刷新通知端点） */
+    private fun registerNetworkCallback() {
+        runCatching {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    refreshEndpointAfterNetworkChange()
+                }
+
+                override fun onLost(network: Network) {
+                    refreshEndpointAfterNetworkChange()
+                }
+
+                override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                    refreshEndpointAfterNetworkChange()
+                }
+            }
+            cm.registerDefaultNetworkCallback(callback)
+            networkCallback = callback
+        }.onFailure {
+            LogBus.warn("注册网络变化监听失败：${it.message}")
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        val cb = networkCallback ?: return
+        networkCallback = null
+        runCatching {
+            (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager)
+                .unregisterNetworkCallback(cb)
+        }
+    }
+
+    /** 网络变化后：若服务在运行，重新计算局域网 IP 并刷新通知（不重启服务、不影响已有连接） */
+    private fun refreshEndpointAfterNetworkChange() {
+        val st = ServerController.state.value
+        if (!st.running || st.loopbackOnly) return
+        val newIp = NetUtils.lanIpv4()
+        val oldIp = st.lanIp
+        LogBus.info("网络状态变化，IP: ${oldIp ?: "无"} → ${newIp ?: "无"}")
+        if (newIp != oldIp) {
+            ServerController.update { it.copy(lanIp = newIp) }
+            if (newIp != null) {
+                updateNotification(
+                    getString(R.string.notif_running, st.mode.label, st.port),
+                    endpointText(st.mode, newIp, st.port),
+                )
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -164,6 +231,14 @@ class MountService : Service() {
                 }
                 hiddenNotification = settings.hideNotification
 
+                // 启动前先做端口占用预检：被占用时直接给出明确提示，
+                // 不再等到 bind 失败后靠异常文本猜测（旧实现在这步会卡在
+                // "无法解析的异常信息"，用户不知道是端口问题）。
+                val bindAddr = if (settings.loopbackOnly) "127.0.0.1" else null
+                if (!NetUtils.portAvailable(port, bindAddr)) {
+                    throw BindException("端口 $port 已被占用，请换一个端口或在设置里修改")
+                }
+
                 val client = GitHubClient(settings.token)
                 val repo = GitRepository(client, settings.owner, settings.repoName, settings.branch)
                 this@MountService.repo = repo
@@ -174,7 +249,6 @@ class MountService : Service() {
 
                 val credentials = { settings.username to settings.password }
                 // loopbackOnly=true 时只监听 127.0.0.1，不暴露局域网
-                val bindAddr = if (settings.loopbackOnly) "127.0.0.1" else null
                 val lanIp = if (settings.loopbackOnly) null else NetUtils.lanIpv4()
 
                 val actualPort = when (mode) {
@@ -218,8 +292,9 @@ class MountService : Service() {
                     endpointText(mode, lanIp, actualPort),
                 )
             } catch (e: Exception) {
-                LogBus.error("启动失败：${e.message}")
-                updateNotification(getString(R.string.notif_stopped), e.message)
+                val reason = startFailureReason(e)
+                LogBus.error("启动失败：$reason")
+                updateNotification(getString(R.string.notif_stopped), reason)
                 // 先清理（reset 会清空状态），再把错误写回去，否则 UI 永远看不到失败原因
                 shutdownServers()
                 ServerController.setState(
@@ -228,12 +303,30 @@ class MountService : Service() {
                         starting = false,
                         mode = mode,
                         port = port,
-                        error = e.message ?: "未知错误",
+                        error = reason,
                     )
                 )
                 stopSelf()
             }
         }
+    }
+
+    /**
+     * 把启动失败按原因分类翻译成用户能看懂的话，不再让 BindException /
+     * ConnectException 等底层异常原文直接冒到通知/主界面。
+     */
+    private fun startFailureReason(e: Exception): String = when (e) {
+        is BindException -> e.message ?: "端口被占用，请换一个端口"
+        is GitHubApiException -> when (e.code) {
+            401 -> "GitHub 令牌无效或已过期（401），请到仓库设置重新填写"
+            403 -> "GitHub 拒绝访问（403）：可能触发了速率限制或令牌权限不足"
+            404 -> "仓库不存在或无权限访问（404），请检查仓库设置"
+            else -> "GitHub 返回 ${e.code}：${e.message}"
+        }
+        is java.net.ConnectException, is java.net.SocketTimeoutException ->
+            "无法连接 GitHub（网络不通或超时），请检查网络后重试"
+        is IllegalStateException -> e.message ?: "配置不完整，请检查设置"
+        else -> e.message ?: "未知错误"
     }
 
     private fun endpointText(mode: ServerMode, ip: String?, port: Int): String? {
