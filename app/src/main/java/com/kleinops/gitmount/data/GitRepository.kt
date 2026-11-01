@@ -95,6 +95,18 @@ class GitRepository(
     }
 
     /**
+     * 无条件清空全部缓存（供系统内存压力回调 onTrimMemory 调用）。
+     * 与 reclaimIfIdle 的区别：不判断空闲时长、不更新 lastActiveAt，
+     * 系统明确要求释放内存时立即归还，下次访问自然重建。
+     * 目录缓存 30s TTL、文件缓存 60s TTL，重建成本可忽略。
+     */
+    fun forceRelease() {
+        dirCache.clear()
+        fileCache.clear()
+        fileCacheBytes.set(0)
+    }
+
+    /**
      * 规范化路径：把 ".." 与 "." 真正折叠掉，而不是直接拒绝。
      *
      * 折叠（而非拒绝）的原因：FTP 的 CDUP / 客户端的 "cd .." 必须能用。

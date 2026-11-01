@@ -10,7 +10,6 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.nio.charset.StandardCharsets
 import java.util.Locale
-import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** 请求体超过上限（在读取 body 前抛出，由服务器层转 413） */
@@ -35,9 +34,16 @@ class HttpServer(
         }
     }
     private val running = AtomicBoolean(true)
-    private val pool = Executors.newCachedThreadPool { r ->
-        Thread(r, "dav-http").apply { isDaemon = true }
-    }
+    /**
+     * 工作线程池：newCachedThreadPool 默认空闲 60s 才回收线程，
+     * 而每个线程有独立的栈（默认 1MB 虚拟内存 + 实际栈页），
+     * 空闲时段这些线程只是白占内存。这里把 keepAlive 压到 8s，
+     * 服务空闲几秒后线程自动退场，内存回落到基线。
+     */
+    private val pool = java.util.concurrent.ThreadPoolExecutor(
+        0, Int.MAX_VALUE, 8L, java.util.concurrent.TimeUnit.SECONDS,
+        java.util.concurrent.SynchronousQueue(),
+    ) { r -> Thread(r, "dav-http").apply { isDaemon = true } }
 
     val boundPort: Int get() = serverSocket.localPort
 

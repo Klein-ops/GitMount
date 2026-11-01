@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -77,6 +78,10 @@ class MountService : Service() {
     private var startJob: Job? = null
     private lateinit var settingsRepo: SettingsRepository
 
+    /** 当前持有的仓库对象：供 onTrimMemory 释放缓存（空引用时直接跳过） */
+    @Volatile
+    private var repo: GitRepository? = null
+
     /** true = 隐藏前台服务常驻通知（用静默渠道），启动后从设置读取 */
     @Volatile
     private var hiddenNotification = false
@@ -116,6 +121,20 @@ class MountService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /**
+     * 系统内存压力回调：应用不在前台时，系统会频繁回调此方法要求降内存。
+     * 这里清空仓库文件缓存（目录/文件缓存都有短 TTL，重建成本可忽略），
+     * 并主动 GC 一次（System.gc 只是建议，但能帮助 ART 尽快回收弱引用与临时对象）。
+     */
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        val r = repo
+        if (r != null && level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
+            r.forceRelease()
+            LogBus.info("系统内存压力回调（level=$level），已释放仓库缓存")
+        }
+    }
+
     override fun onDestroy() {
         shutdownServers()
         scope.cancel()
@@ -147,6 +166,7 @@ class MountService : Service() {
 
                 val client = GitHubClient(settings.token)
                 val repo = GitRepository(client, settings.owner, settings.repoName, settings.branch)
+                this@MountService.repo = repo
 
                 // 启动前做一次真实连通性校验，避免“显示已启动但实际不可用”
                 val probes = repo.visibleList("/")
@@ -234,6 +254,9 @@ class MountService : Service() {
             LogBus.warn("停止 FTP 异常：${e.message}")
         }
         ftpServer = null
+        // 释放仓库对象（含其全部缓存），避免停止服务后仍被 Service 持有
+        repo?.forceRelease()
+        repo = null
         if (ServerController.state.value.running || ServerController.state.value.starting) {
             LogBus.info("服务已停止")
         }

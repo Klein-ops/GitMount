@@ -16,7 +16,6 @@ import java.nio.charset.StandardCharsets
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -41,9 +40,14 @@ class FtpServer(
 ) {
     private var serverSocket: ServerSocket? = null
     private val running = AtomicBoolean(false)
-    private val pool = Executors.newCachedThreadPool { r ->
-        Thread(r, "ftp-session").apply { isDaemon = true }
-    }
+    /**
+     * 会话线程池：默认 cachedThreadPool 空闲 60s 才回收，
+     * FTP 客户端断开后线程仍占栈内存。压到 8s 让空闲会话线程尽快退场。
+     */
+    private val pool = java.util.concurrent.ThreadPoolExecutor(
+        0, Int.MAX_VALUE, 8L, java.util.concurrent.TimeUnit.SECONDS,
+        java.util.concurrent.SynchronousQueue(),
+    ) { r -> Thread(r, "ftp-session").apply { isDaemon = true } }
 
     val boundPort: Int get() = serverSocket?.localPort ?: port
 
