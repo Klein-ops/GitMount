@@ -24,7 +24,7 @@
     <string name="settings_bg_battery_err">无法打开电池优化设置</string>
 
     <string name="settings_bg_auto_start">打开应用时自动启动服务</string>
-    <string name="settings_bg_auto_start_desc">进入 App 时自动启动 FTP / WebDAV 服务（需已配置仓库）</string>
+    <string name="settings_bg_auto_start_desc">进入 App 时自动启动 FTP / WebDAV 服务；开启后也会在手机开机后尝试自动启动（需已配置仓库与访问账号）</string>
 
     <!-- 静默通知渠道：隐藏通知时使用，Android 8+ 最低优先级，无声音无打扰 -->
     <string name="channel_silent_name">挂载服务（静默）</string>

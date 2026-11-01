@@ -249,6 +249,26 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
             Spacer(Modifier.height(4.dp))
             Button(
                 onClick = {
+                    // 端口占用预检：保存设置前先试 bind 一下当前协议端口，
+                    // 被占用时给出明确提示，避免启动后才发现端口被占。
+                    val checkPort = if (mode == ServerMode.FTP) {
+                        ftpPort.toIntOrNull()
+                    } else {
+                        webdavPort.toIntOrNull()
+                    }
+                    if (checkPort == null || checkPort !in 1..65535) {
+                        scope.launch { snackbar.showSnackbar("端口必须是 1~65535 的整数") }
+                        return@Button
+                    }
+                    // 服务正在运行时，当前运行端口被自己的服务占用属于正常情况，
+                    // 只有「改成了别的端口」才需要检查新端口是否可用。
+                    val runningPort = if (server.running) server.port else 0
+                    if (checkPort != runningPort &&
+                        !com.kleinops.gitmount.service.NetUtils.portAvailable(checkPort, if (loopbackOnly) "127.0.0.1" else null)
+                    ) {
+                        scope.launch { snackbar.showSnackbar("端口 $checkPort 已被占用，请换一个端口") }
+                        return@Button
+                    }
                     val restartNeeded = server.running &&
                         (hideNotification != settings.hideNotification ||
                             loopbackOnly != settings.loopbackOnly ||

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 分享日志：外部私有目录（/storage/emulated/0/Android/data/<pkg>/files/logs） -->
+    <external-files-path name="logs" path="logs/" />
+    <!-- 外部存储不可用时的回退目录（应用内部私有目录） -->
+    <files-path name="logs_internal" path="logs/" />
+</paths>

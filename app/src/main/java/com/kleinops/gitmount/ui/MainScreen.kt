@@ -3,6 +3,7 @@ package com.kleinops.gitmount.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -87,6 +88,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
     val setupState by vm.setupState.collectAsStateWithLifecycle()
     val scanState by vm.scanState.collectAsStateWithLifecycle()
     val repoOpState by vm.repoOpState.collectAsStateWithLifecycle()
+    val rateLimitState by vm.rateLimitState.collectAsStateWithLifecycle()
 
     var showRepoList by remember { mutableStateOf(false) }
     var showCreateRepo by remember { mutableStateOf(false) }
@@ -104,6 +106,11 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
     // 已配置仓库时，进入主界面自动查一次容量（后续可手动刷新）
     LaunchedEffect(settings.isConfigured) {
         if (settings.isConfigured) vm.loadRepoInfo()
+    }
+
+    // 已配置仓库时，自动查询一次 GitHub API 本小时剩余调用余额
+    LaunchedEffect(settings.isConfigured) {
+        if (settings.isConfigured) vm.loadRateLimit()
     }
 
     // 打开应用自动启动服务（设置里可开关）。
@@ -220,6 +227,10 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                         InfoRow("端口", server.port.toString(), mono = true)
                         InfoRow("用户名", server.username, mono = true)
                         InfoRow("密码", "••••••", mono = true)
+                        if (server.activeSessions > 0 || server.totalBytes > 0) {
+                            InfoRow("活跃会话", server.activeSessions.toString(), mono = true)
+                            InfoRow("已传流量", formatBytes(server.totalBytes), mono = true)
+                        }
                         Spacer(Modifier.height(12.dp))
                         Text(
                             if (server.loopbackOnly) {
@@ -422,12 +433,59 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                 }
             }
 
+            // GitHub API 剩余调用余额（贴心功能：让用户知道这个小时还能调用多少次接口）
+            item {
+                SectionCard(title = "GitHub API") {
+                    when (val rl = rateLimitState) {
+                        is RateLimitState.Idle -> Text(
+                            "未查询",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        is RateLimitState.Loading -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.width(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("正在查询本小时剩余调用次数…", style = MaterialTheme.typography.bodySmall)
+                        }
+                        is RateLimitState.Error -> Column {
+                            Text(
+                                "余额查询失败：${rl.message}",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            TextButton(onClick = { vm.loadRateLimit() }) { Text("重试") }
+                        }
+                        is RateLimitState.Success -> Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "本小时剩余 ${rl.remaining} / ${rl.limit} 次",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                Text(
+                                    "GitHub REST API 调用额度（每小时重置；查询本身不扣额度）",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            TextButton(onClick = { vm.loadRateLimit() }) { Text("刷新") }
+                        }
+                    }
+                }
+            }
+
             // 运行日志
             item {
                 SectionCard(
                     title = "运行日志",
                     trailing = {
-                        TextButton(onClick = { vm.clearLogs() }) { Text("清空") }
+                        Row {
+                            TextButton(onClick = { shareLogs(context) }) { Text("分享") }
+                            TextButton(onClick = { vm.clearLogs() }) { Text("清空") }
+                        }
                     },
                 ) {
                     if (logs.isEmpty()) {
@@ -820,4 +878,38 @@ private fun CreateRepoDialog(
             TextButton(onClick = onDismiss, enabled = !isWorking) { Text("取消") }
         },
     )
+}
+
+/** 字节数人类可读化（B / KB / MB / GB，保留 1 位小数） */
+private fun formatBytes(bytes: Long): String = when {
+    bytes < 0 -> "0 B"
+    bytes < 1024 -> "$bytes B"
+    bytes < 1024 * 1024 -> String.format(java.util.Locale.US, "%.1f KB", bytes / 1024.0)
+    bytes < 1024L * 1024 * 1024 -> String.format(java.util.Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)
+    else -> String.format(java.util.Locale.US, "%.1f GB", bytes / 1024.0 / 1024.0 / 1024.0)
+}
+
+/** 分享日志：把 FileLogger 当天的日志文件用系统分享面板发出去（排查问题一键导出） */
+private fun shareLogs(context: Context) {
+    val file = com.kleinops.gitmount.service.FileLogger.shareableLogFile()
+    if (file == null) {
+        android.widget.Toast.makeText(context, "暂无日志可分享", android.widget.Toast.LENGTH_SHORT).show()
+        return
+    }
+    runCatching {
+        val uri = androidx.core.content.FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            file,
+        )
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_SUBJECT, "GitMount 日志 ${file.name}")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(intent, "分享 GitMount 日志"))
+    }.onFailure {
+        android.widget.Toast.makeText(context, "分享失败：${it.message}", android.widget.Toast.LENGTH_SHORT).show()
+    }
 }

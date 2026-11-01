@@ -47,6 +47,14 @@ sealed interface RepoOpState {
     data class Error(val message: String) : RepoOpState
 }
 
+/** GitHub API 本小时剩余调用余额查询状态 */
+sealed interface RateLimitState {
+    data object Idle : RateLimitState
+    data object Loading : RateLimitState
+    data class Success(val limit: Int, val remaining: Int) : RateLimitState
+    data class Error(val message: String) : RateLimitState
+}
+
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val settingsRepo = SettingsRepository(app)
@@ -65,6 +73,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _repoOpState = MutableStateFlow<RepoOpState>(RepoOpState.Idle)
     val repoOpState: StateFlow<RepoOpState> = _repoOpState
+
+    private val _rateLimitState = MutableStateFlow<RateLimitState>(RateLimitState.Idle)
+    val rateLimitState: StateFlow<RateLimitState> = _rateLimitState
 
     /** 扫描仓库结果缓存：同一 token 5 分钟内不重复请求（避免反复开关对话框打爆配额） */
     private data class ScanCache(val token: String, val login: String, val repos: List<RepoBrief>, val at: Long)
@@ -143,6 +154,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _repoOpState.value = RepoOpState.Success(info)
             } catch (e: Exception) {
                 _repoOpState.value = RepoOpState.Error(friendly(e))
+            }
+        }
+    }
+
+    /**
+     * 查询 GitHub API 本小时剩余调用余额（GET /rate_limit 不计入配额）。
+     * 已配置 token 时自动查询一次；结果用于主界面显示，让用户知道这个小时
+     * 还能调用多少次接口，避免临近上限时上传/下载突然 403。
+     */
+    fun loadRateLimit() {
+        val token = settings.value.token
+        if (token.isBlank()) {
+            _rateLimitState.value = RateLimitState.Error("未配置令牌，无法查询")
+            return
+        }
+        _rateLimitState.value = RateLimitState.Loading
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val (limit, remaining) = GitHubClient(token).rateLimit()
+                _rateLimitState.value = RateLimitState.Success(limit, remaining)
+            } catch (e: Exception) {
+                _rateLimitState.value = RateLimitState.Error(friendly(e))
             }
         }
     }

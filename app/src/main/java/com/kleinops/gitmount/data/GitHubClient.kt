@@ -143,6 +143,23 @@ class GitHubClient(private val token: String) {
         return JSONObject(body).optString("login")
     }
 
+    /**
+     * 查询 GitHub API 本小时速率限制（GET /rate_limit 不计入配额）。
+     * 返回 core 主限流（除 search 外全部 REST 调用）的 limit/remaining/reset。
+     * 便于用户了解"这个小时还能调用多少次 GitHub API"，避免快到上限时
+     * 上传/下载突然 403 才反应过来。
+     */
+    fun rateLimit(): Pair<Int, Int> {
+        val body = execute(authRequest(url("/rate_limit")).get())
+        val o = JSONObject(body)
+        val core = o.optJSONObject("resources")?.optJSONObject("core") ?: JSONObject()
+        // remaining 可能为负（超出后 GitHub 返回 0？实测为 0 封顶），coerceAtLeast 兜底
+        val remaining = core.optInt("remaining", -1).coerceAtLeast(0)
+        val limit = core.optInt("limit", -1)
+        if (remaining < 0 || limit < 0) throw GitHubApiException(502, "无法解析速率限制响应")
+        return limit to remaining
+    }
+
     /** 查询仓库默认分支（用于判断仓库已存在） */
     fun getDefaultBranch(owner: String, repo: String): String? {
         return try {

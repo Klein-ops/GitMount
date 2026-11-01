@@ -86,4 +86,18 @@ object FileLogger {
             }
         }
     }
+
+    /**
+     * 返回当前可分享的最新日志文件（今天的日志文件，若不存在则尝试昨天）。
+     * 供主界面「分享日志」一键导出排查问题。
+     */
+    fun shareableLogFile(): File? {
+        val dir = logDir ?: return null
+        val today = File(dir, "$FILE_PREFIX${dayFormat.format(Date())}.log")
+        if (today.exists() && today.length() > 0) return today
+        // 今天还没有日志（例如刚开机未触发过），退回最近一天
+        return dir.listFiles { f -> f.isFile && f.name.startsWith(FILE_PREFIX) }
+            ?.maxByOrNull { it.lastModified() }
+            ?.takeIf { it.length() > 0 }
+    }
 }
