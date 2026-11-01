@@ -202,12 +202,6 @@ class MountService : Service() {
         }
     }
 
-    override fun onDestroy() {
-        shutdownServers()
-        scope.cancel()
-        super.onDestroy()
-    }
-
     private fun defaultPort(mode: ServerMode): Int =
         if (mode == ServerMode.FTP) 2121 else 8080
 
