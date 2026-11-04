@@ -50,6 +50,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.kleinops.gitmount.R
 import com.kleinops.gitmount.data.ServerMode
+import com.kleinops.gitmount.service.LogBus
+import com.kleinops.gitmount.service.MountService
 import com.kleinops.gitmount.ui.components.SectionCard
 import kotlinx.coroutines.launch
 
@@ -269,10 +271,21 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                         scope.launch { snackbar.showSnackbar("端口 $checkPort 已被占用，请换一个端口") }
                         return@Button
                     }
+                    // 影响服务运行参数的改动：模式 / 端口 / 仅本机 / 账号 / 密码 / 通知显示。
+                    // 保存后若服务正在运行，自动用新设置重启，不再要求用户手动停止再启动。
+                    val savedPort = if (mode == ServerMode.FTP) ftpPort.toIntOrNull() else webdavPort.toIntOrNull()
+                    val oldPort = if (runCatching { ServerMode.valueOf(settings.mode) }.getOrDefault(ServerMode.WEBDAV) == ServerMode.FTP) {
+                        settings.ftpPort
+                    } else {
+                        settings.webdavPort
+                    }
                     val restartNeeded = server.running &&
-                        (hideNotification != settings.hideNotification ||
+                        (mode.name != settings.mode ||
+                            savedPort != oldPort ||
                             loopbackOnly != settings.loopbackOnly ||
-                            mode.name != settings.mode)
+                            username.trim() != settings.username ||
+                            password != settings.password ||
+                            hideNotification != settings.hideNotification)
                     vm.saveServerSettings(
                         mode = mode,
                         ftpPort = ftpPort.toIntOrNull() ?: 2121,
@@ -284,9 +297,13 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                         autoStart = autoStart,
                         hideFromRecents = hideFromRecents,
                     )
+                    if (restartNeeded) {
+                        LogBus.info("服务设置已变更，自动重启服务使新设置生效")
+                        MountService.restart(context)
+                    }
                     scope.launch {
                         snackbar.showSnackbar(
-                            if (restartNeeded) "已保存。通知/监听地址/协议的改动需重启服务后生效"
+                            if (restartNeeded) "已保存，正在用新设置重启服务…"
                             else "设置已保存"
                         )
                     }

@@ -46,6 +46,7 @@ class MountService : Service() {
 
         const val ACTION_START = "com.kleinops.gitmount.action.START"
         const val ACTION_STOP = "com.kleinops.gitmount.action.STOP"
+        const val ACTION_RESTART = "com.kleinops.gitmount.action.RESTART"
         const val EXTRA_MODE = "extra_mode"
         const val EXTRA_PORT = "extra_port"
 
@@ -55,6 +56,18 @@ class MountService : Service() {
                 action = ACTION_START
                 putExtra(EXTRA_MODE, mode.name)
                 putExtra(EXTRA_PORT, port)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
+
+        /** 由 UI 调用：用最新保存的设置重启服务（模式/端口/账号/仓库变更后立即生效） */
+        fun restart(context: Context) {
+            val intent = Intent(context, MountService::class.java).apply {
+                action = ACTION_RESTART
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -169,6 +182,14 @@ class MountService : Service() {
                 stopSelf()
                 return START_NOT_STICKY
             }
+            ACTION_RESTART -> {
+                // 用最新保存的设置重启（模式/端口/账号/仓库变更后立即生效，
+                // 不再要求用户手动停止再启动）。
+                LogBus.info("收到重启指令，按最新设置重启服务…")
+                startForeground(NOTIF_ID, buildNotification(getString(R.string.notif_starting), null, hiddenNotification))
+                restartServers()
+                return START_STICKY
+            }
             ACTION_START -> {
                 val mode = intent.getStringExtra(EXTRA_MODE)
                     ?.let { runCatching { ServerMode.valueOf(it) }.getOrNull() }
@@ -204,6 +225,26 @@ class MountService : Service() {
 
     private fun defaultPort(mode: ServerMode): Int =
         if (mode == ServerMode.FTP) 2121 else 8080
+
+    /**
+     * 按最新保存的设置重启服务（先停旧服务器实例，再用新设置拉起）。
+     * 与 ACTION_STOP 不同：这里不退出服务、不摘除前台，避免重启瞬间
+     * 前台服务出现"非前台间隙"被系统判定违规。
+     */
+    private fun restartServers() {
+        shutdownServers(keepForeground = true)
+        scope.launch {
+            val settings = settingsRepo.settings.first()
+            if (!settings.isConfigured) {
+                LogBus.warn("重启失败：尚未配置 GitHub 仓库信息")
+                return@launch
+            }
+            val mode = runCatching { ServerMode.valueOf(settings.mode) }
+                .getOrDefault(ServerMode.WEBDAV)
+            val port = if (mode == ServerMode.FTP) settings.ftpPort else settings.webdavPort
+            startServers(mode, port)
+        }
+    }
 
     private fun startServers(mode: ServerMode, port: Int) {
         if (ServerController.state.value.running || ServerController.state.value.starting) {
@@ -328,7 +369,7 @@ class MountService : Service() {
         return if (mode == ServerMode.WEBDAV) "http://$ip:$port/" else "ftp://$ip:$port/"
     }
 
-    private fun shutdownServers() {
+    private fun shutdownServers(keepForeground: Boolean = false) {
         try {
             httpServer?.stop()
         } catch (e: Exception) {
@@ -348,11 +389,14 @@ class MountService : Service() {
             LogBus.info("服务已停止")
         }
         ServerController.reset()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-        } else {
-            @Suppress("DEPRECATION")
-            stopForeground(true)
+        // 重启场景（keepForeground=true）保留前台通知，避免出现"非前台间隙"
+        if (!keepForeground) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
         }
     }
 

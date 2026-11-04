@@ -66,6 +66,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.kleinops.gitmount.data.ServerMode
+import com.kleinops.gitmount.service.LogBus
 import com.kleinops.gitmount.service.MountService
 import com.kleinops.gitmount.ui.components.ClickableInfoRow
 import com.kleinops.gitmount.ui.components.EmptyHint
@@ -103,13 +104,15 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
         return
     }
 
-    // 已配置仓库时，进入主界面自动查一次容量（后续可手动刷新）
-    LaunchedEffect(settings.isConfigured) {
+    // 已配置仓库时，进入主界面自动查一次容量（后续可手动刷新）；
+    // 监听仓库身份字段（owner/repoName/branch/token）变化，绑定/切换仓库后自动重查，
+    // 否则新仓库的公开/私有和容量不会自动更新，需要手动再刷新一遍。
+    LaunchedEffect(settings.owner, settings.repoName, settings.branch, settings.token) {
         if (settings.isConfigured) vm.loadRepoInfo()
     }
 
-    // 已配置仓库时，自动查询一次 GitHub API 本小时剩余调用余额
-    LaunchedEffect(settings.isConfigured) {
+    // 已配置仓库时，自动查询一次 GitHub API 本小时剩余调用余额（换仓库/换令牌后也重查）
+    LaunchedEffect(settings.owner, settings.repoName, settings.branch, settings.token) {
         if (settings.isConfigured) vm.loadRateLimit()
     }
 
@@ -140,6 +143,12 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
             showRepoList = false
             showCreateRepo = false
             vm.clearSetupMessage()
+            // 换绑/新建仓库成功后：若服务正在运行，自动用新仓库重启，
+            // 否则服务仍持有旧仓库对象，访问的还是旧仓库内容（需手动重启才生效）。
+            if (server.running && !server.starting) {
+                LogBus.info("仓库配置已变更，自动重启服务使新仓库生效")
+                MountService.restart(context)
+            }
             snackbar.showSnackbar(message)
         }
     }
