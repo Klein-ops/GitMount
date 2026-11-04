@@ -296,17 +296,15 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                         hideNotification = hideNotification,
                         autoStart = autoStart,
                         hideFromRecents = hideFromRecents,
+                        // 落盘完成后：需要重启则重启，然后返回主界面（主界面响应式展示最新状态）
+                        onSaved = {
+                            if (restartNeeded) {
+                                LogBus.info("服务设置已变更，自动重启服务使新设置生效")
+                                MountService.restart(context)
+                            }
+                            onBack()
+                        },
                     )
-                    if (restartNeeded) {
-                        LogBus.info("服务设置已变更，自动重启服务使新设置生效")
-                        MountService.restart(context)
-                    }
-                    scope.launch {
-                        snackbar.showSnackbar(
-                            if (restartNeeded) "已保存，正在用新设置重启服务…"
-                            else "设置已保存"
-                        )
-                    }
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("保存设置") }

@@ -293,6 +293,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         hideNotification: Boolean,
         autoStart: Boolean,
         hideFromRecents: Boolean,
+        /** 落盘完成后回调（调用方据此再触发重启/返回，避免读到旧配置） */
+        onSaved: () -> Unit = {},
     ) {
         if (username.isBlank() || password.isBlank()) {
             LogBus.warn("访问账号或密码为空，服务启动后无法登录")
@@ -309,6 +311,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     "${if (hideFromRecents) "后台隐藏" else "任务列表可见"} / " +
                     "${if (autoStart) "自启动开" else "自启动关"}"
             )
+            onSaved()
         }
     }
 
