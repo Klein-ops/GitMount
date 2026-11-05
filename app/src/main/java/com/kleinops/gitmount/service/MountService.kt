@@ -52,6 +52,8 @@ class MountService : Service() {
 
         /** 由 UI 调用：启动服务 */
         fun start(context: Context, mode: ServerMode, port: Int) {
+            // 记录用户意图：期望服务保持运行（进程被杀后据此自动恢复）
+            persistIntent(context, enabled = true)
             val intent = Intent(context, MountService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_MODE, mode.name)
@@ -66,6 +68,8 @@ class MountService : Service() {
 
         /** 由 UI 调用：用最新保存的设置重启服务（模式/端口/账号/仓库变更后立即生效） */
         fun restart(context: Context) {
+            // 重启同样意味着用户期望服务运行，确保意图标记为 true
+            persistIntent(context, enabled = true)
             val intent = Intent(context, MountService::class.java).apply {
                 action = ACTION_RESTART
             }
@@ -77,6 +81,8 @@ class MountService : Service() {
         }
 
         fun stop(context: Context) {
+            // 用户手动停止：清除"期望运行"意图，即便进程被杀也不再自动恢复
+            persistIntent(context, enabled = false)
             val intent = Intent(context, MountService::class.java).apply {
                 action = ACTION_STOP
             }
@@ -86,6 +92,20 @@ class MountService : Service() {
                 context.startForegroundService(intent)
             } else {
                 context.startService(intent)
+            }
+        }
+
+        /**
+         * 持久化"用户期望服务运行"的意图（独立于服务生命周期的协程落盘，
+         * 避免被服务 onDestroy 的 scope.cancel 取消导致标记丢失）。
+         */
+        private fun persistIntent(context: Context, enabled: Boolean) {
+            CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+                runCatching {
+                    SettingsRepository(context.applicationContext).setServiceEnabled(enabled)
+                }.onFailure {
+                    LogBus.warn("写入服务运行意图失败：${it.message}")
+                }
             }
         }
     }
@@ -175,6 +195,9 @@ class MountService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                // 通知栏"停止"按钮直接发 ACTION_STOP（不经 MountService.stop()），
+                // 这里同样清除"期望运行"意图，否则用户点通知栏停止后进程被杀仍会自动恢复。
+                persistIntent(this, enabled = false)
                 // 若本服务是通过 startForegroundService 拉起的，必须先 startForeground
                 // 才能安全退出，否则系统会抛 "did not then call Service.startForeground()"。
                 startForeground(NOTIF_ID, buildNotification(getString(R.string.notif_stopped), null, hiddenNotification))
@@ -198,10 +221,34 @@ class MountService : Service() {
                 startServers(mode, port)
             }
             else -> {
-                // 系统重建服务：没有配置就不重启，避免异常循环
-                LogBus.warn("服务被系统重建，等待用户重新启动")
-                stopSelf()
-                return START_NOT_STICKY
+                // 系统按 START_STICKY 重建服务（进程被杀后 intent 为 null 或 action 未知）。
+                // 只有"用户上次手动开过服务（持久化意图为 true）且配置完整"才自动按最新设置恢复；
+                // 用户从未开启或已手动停止 → 保持停止，不做无意义的重启（避免异常循环）。
+                LogBus.info("服务进程被系统回收，检查用户意图决定是否自动恢复…")
+                scope.launch {
+                    val settings = runCatching { settingsRepo.settings.first() }.getOrNull()
+                    val shouldResume = settings != null &&
+                        settings.serviceEnabled &&
+                        settings.isConfigured &&
+                        settings.username.isNotBlank() &&
+                        settings.password.isNotBlank()
+                    if (shouldResume) {
+                        LogBus.info("检测到用户曾开启服务，自动按最新配置恢复")
+                        // 系统重建的前台服务也先补一次 startForeground，避免恢复期间被判定非前台
+                        startForeground(
+                            NOTIF_ID,
+                            buildNotification(getString(R.string.notif_starting), null, hiddenNotification),
+                        )
+                        val mode = runCatching { ServerMode.valueOf(settings.mode) }
+                            .getOrDefault(ServerMode.WEBDAV)
+                        val port = if (mode == ServerMode.FTP) settings.ftpPort else settings.webdavPort
+                        startServers(mode, port)
+                    } else {
+                        LogBus.warn("无服务运行意图（用户未开启或已停止），保持停止")
+                        stopSelf()
+                    }
+                }
+                return START_STICKY
             }
         }
         return START_STICKY

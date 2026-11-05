@@ -40,6 +40,13 @@ data class AppSettings(
     val hideFromRecents: Boolean = false,
     /** true = 打开 App 时自动启动服务（需已配置仓库） */
     val autoStart: Boolean = true,
+    /**
+     * 用户期望服务运行（持久化的运行意图）：
+     * 手动点"开始服务"写 true，点"停止服务"（含通知栏停止按钮）写 false。
+     * 服务进程被系统回收、按 START_STICKY 重建时，据此决定是否自动恢复——
+     * true 则按最新设置拉起，false 则保持停止，避免"用户没开/已停却自己跑起来"。
+     */
+    val serviceEnabled: Boolean = false,
 ) {
     val isConfigured: Boolean get() = token.isNotBlank() && owner.isNotBlank() && repoName.isNotBlank()
 }
@@ -107,6 +114,7 @@ class SettingsRepository(private val context: Context) {
         val HIDE_NOTIFICATION = booleanPreferencesKey("hide_notification")
         val HIDE_FROM_RECENTS = booleanPreferencesKey("hide_from_recents")
         val AUTO_START = booleanPreferencesKey("auto_start")
+        val SERVICE_ENABLED = booleanPreferencesKey("service_enabled")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { p ->
@@ -124,6 +132,7 @@ class SettingsRepository(private val context: Context) {
             hideNotification = p[Keys.HIDE_NOTIFICATION] ?: true,
             hideFromRecents = p[Keys.HIDE_FROM_RECENTS] ?: false,
             autoStart = p[Keys.AUTO_START] ?: true,
+            serviceEnabled = p[Keys.SERVICE_ENABLED] ?: false,
         )
     }
 
@@ -158,6 +167,15 @@ class SettingsRepository(private val context: Context) {
             p[Keys.HIDE_FROM_RECENTS] = hideFromRecents
             p[Keys.AUTO_START] = autoStart
         }
+    }
+
+    /**
+     * 记录/清除"用户期望服务运行"的持久化意图。
+     * 手动点"开始服务"传 true，点"停止服务"（含通知栏停止按钮）传 false。
+     * 服务被系统回收、按 START_STICKY 重建时据此决定是否自动恢复。
+     */
+    suspend fun setServiceEnabled(enabled: Boolean) {
+        context.dataStore.edit { p -> p[Keys.SERVICE_ENABLED] = enabled }
     }
 
     suspend fun clearAll() {
