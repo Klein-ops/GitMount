@@ -30,6 +30,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * 前台服务：持有 FTP / WebDAV 服务器实例，保证息屏后仍可访问。
@@ -49,6 +50,17 @@ class MountService : Service() {
         const val ACTION_RESTART = "com.kleinops.gitmount.action.RESTART"
         const val EXTRA_MODE = "extra_mode"
         const val EXTRA_PORT = "extra_port"
+
+        /**
+         * 启动流程整体超时：从设置读取 → 端口预检 → GitHub 连通性校验 → 拉起服务器，
+         * 任何一步卡住（DataStore 读、GitHub 网络、系统冻结恢复）都必须在有限时间内
+         * 收敛成明确失败并清理，绝不永久悬挂"正在启动"（实测曾出现卡 3.5 小时）。
+         * 120s 足以覆盖 15s 连接 + OkHttp 读超时 + 余量；超时即视为失败。
+         */
+        private const val START_TIMEOUT_MS = 120_000L
+
+        /** DataStore 读取超时：本地文件操作正常毫秒级，兜底防卡死 */
+        private const val SETTINGS_READ_TIMEOUT_MS = 10_000L
 
         /** 由 UI 调用：启动服务 */
         fun start(context: Context, mode: ServerMode, port: Int) {
@@ -226,7 +238,10 @@ class MountService : Service() {
                 // 用户从未开启或已手动停止 → 保持停止，不做无意义的重启（避免异常循环）。
                 LogBus.info("服务进程被系统回收，检查用户意图决定是否自动恢复…")
                 scope.launch {
-                    val settings = runCatching { settingsRepo.settings.first() }.getOrNull()
+                    // DataStore 读取同样加超时，防止恢复流程悬挂
+                    val settings = withTimeoutOrNull(SETTINGS_READ_TIMEOUT_MS) {
+                        runCatching { settingsRepo.settings.first() }.getOrNull()
+                    }
                     val shouldResume = settings != null &&
                         settings.serviceEnabled &&
                         settings.isConfigured &&
@@ -281,7 +296,14 @@ class MountService : Service() {
     private fun restartServers() {
         shutdownServers(keepForeground = true)
         scope.launch {
-            val settings = settingsRepo.settings.first()
+            // DataStore 读取同样加超时，避免重启流程悬挂
+            val settings = withTimeoutOrNull(SETTINGS_READ_TIMEOUT_MS) {
+                settingsRepo.settings.first()
+            }
+            if (settings == null) {
+                LogBus.warn("重启失败：读取配置超时")
+                return@launch
+            }
             if (!settings.isConfigured) {
                 LogBus.warn("重启失败：尚未配置 GitHub 仓库信息")
                 return@launch
@@ -304,7 +326,13 @@ class MountService : Service() {
         startJob?.cancel()
         startJob = scope.launch {
             try {
-                val settings = settingsRepo.settings.first()
+                LogBus.info("开始启动 ${mode.label} 服务（端口 $port）…")
+                val completed = withTimeoutOrNull(START_TIMEOUT_MS) {
+                // DataStore 读取单独超时：本地文件读取正常毫秒级，
+                // 兜底防止 DataStore 初始化异常导致永久挂起（外层 120s 整体超时是最后防线）
+                val settings = withTimeoutOrNull(SETTINGS_READ_TIMEOUT_MS) {
+                    settingsRepo.settings.first()
+                } ?: throw IllegalStateException("读取配置超时，请重试")
                 if (!settings.isConfigured) {
                     throw IllegalStateException("尚未配置 GitHub 仓库信息")
                 }
@@ -312,6 +340,20 @@ class MountService : Service() {
                     throw IllegalStateException("请先设置访问用用户名与密码")
                 }
                 hiddenNotification = settings.hideNotification
+
+                // 启动前网络预检：无可用网络时立即失败，不发起 GitHub 请求。
+                // 自动启动（开机/START_STICKY 恢复/autoStart）常发生在后台或断网环境，
+                // 此时 api.github.com 的连接会长时间悬挂，表现为通知一直"正在启动"
+                // 数小时（实测 3.5 小时）。有网才走 GitHub 校验，无网立刻给出明确原因。
+                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                val active = cm.activeNetwork
+                val hasInternet = active != null && (
+                    cm.getNetworkCapabilities(active)
+                        ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+                )
+                if (!hasInternet) {
+                    throw IOException("当前无可用网络，无法连接 GitHub，请联网后重试")
+                }
 
                 // 启动前先做端口占用预检：被占用时直接给出明确提示，
                 // 不再等到 bind 失败后靠异常文本猜测（旧实现在这步会卡在
@@ -373,6 +415,12 @@ class MountService : Service() {
                     getString(R.string.notif_running, mode.label, actualPort),
                     endpointText(mode, lanIp, actualPort),
                 )
+                }
+                // 整个启动流程超时兜底：任何一步卡住（DataStore 读、GitHub 连通性
+                // 校验、系统冻结）都不允许永久悬挂"正在启动"，超时收敛为明确失败。
+                if (completed == null) {
+                    throw IllegalStateException("启动超时（${START_TIMEOUT_MS / 1000} 秒），请检查网络后重试")
+                }
             } catch (e: Exception) {
                 val reason = startFailureReason(e)
                 LogBus.error("启动失败：$reason")
