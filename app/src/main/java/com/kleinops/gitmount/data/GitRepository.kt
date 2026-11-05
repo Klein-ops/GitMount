@@ -355,22 +355,56 @@ class GitRepository(
         invalidate(parent)
     }
 
-    /** 删除文件或目录（目录递归删除） */
+    /**
+     * 删除文件或目录（目录递归删除）。
+     *
+     * 删除同样纳入全局写锁：与上传/覆盖互斥。删除文件夹要逐个文件调
+     * GitHub Contents API、跨秒级时长，若不持锁，期间其他连接（或同连接
+     * 交错操作）改写文件会让删除请求里的 sha 过期，触发 422 乐观锁冲突
+     * （"is at X but expected Y"）。持锁后本服务内的写互斥，再配一次冲突重试兜底。
+     */
     fun delete(path: String) {
         reclaimIfIdle()
         val norm = normalize(path)
         if (norm == "/") throw IOException("不能删除根目录")
-        val node = stat(norm) ?: throw FileNotFoundException("不存在：$norm")
+        writeLock.lock()
+        try {
+            val node = stat(norm) ?: throw FileNotFoundException("不存在：$norm")
 
-        if (!node.isDirectory) {
-            client.deleteFile(owner, repo, toGitPath(norm), node.sha, "删除 ${node.name}", branch)
+            if (!node.isDirectory) {
+                deleteFileWithRetry(norm, node)
+                invalidate(parentOf(norm))
+                invalidate(norm)
+                return
+            }
+            deleteDirectoryRecursive(norm)
             invalidate(parentOf(norm))
             invalidate(norm)
-            return
+        } finally {
+            writeLock.unlock()
         }
-        deleteDirectoryRecursive(norm)
-        invalidate(parentOf(norm))
-        invalidate(norm)
+    }
+
+    /**
+     * 删除单个文件（带一次 sha 冲突重试）。
+     *
+     * GitHub Contents API 用 sha 做乐观锁：删除请求里的 sha 必须等同仓库
+     * 当前 sha，否则返回 422（"is at X but expected Y"）。writeLock 已保证
+     * 本服务内写操作互斥，但仓库仍可能被外部（网页端、其他客户端）改动，
+     * 或存在未知时序，导致删除时 sha 已过期。这里捕获 422 后重新读取最新
+     * sha 再删一次——一次重试足以覆盖"读取列表 → 删除"窗口期的时效竞争。
+     */
+    private fun deleteFileWithRetry(norm: String, node: VfsNode) {
+        val gitPath = toGitPath(norm)
+        try {
+            client.deleteFile(owner, repo, gitPath, node.sha, "删除 ${node.name}", branch)
+        } catch (e: GitHubApiException) {
+            if (e.code != 422) throw e
+            LogBus.warn("删除 ${node.name} 遇 sha 冲突（422），重新读取最新 sha 重试…")
+            val latest = client.getFileMeta(owner, repo, gitPath, branch)
+                ?: return // 文件已不存在（可能已被并发删除），视为删除成功
+            client.deleteFile(owner, repo, gitPath, latest.sha, "删除 ${node.name}", branch)
+        }
     }
 
     private fun deleteDirectoryRecursive(normDir: String) {
@@ -380,7 +414,7 @@ class GitRepository(
             if (child.isDirectory) {
                 deleteDirectoryRecursive(child.path)
             } else {
-                client.deleteFile(owner, repo, toGitPath(child.path), child.sha, "删除 ${child.name}", branch)
+                deleteFileWithRetry(child.path, child)
             }
         }
         invalidate(normDir)
