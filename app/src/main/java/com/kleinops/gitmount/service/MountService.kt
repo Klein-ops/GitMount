@@ -356,6 +356,8 @@ class MountService : Service() {
                                 val server = HttpServer(a.webdavPort, { exchange -> handler.handle(exchange) }, bindAddr)
                                 server.start()
                                 httpServers[a.id] = server
+                                // 登记监听端口：FTP PASV 选数据端口时避让，防止数据端口撞上账户监听端口
+                                AccountManager.registerPort(server.boundPort)
                                 LogBus.info("账户「${a.name}」WebDAV 监听 ${server.boundPort}（休眠，认证后激活）")
                             }
                             ServerMode.FTP -> {
@@ -369,6 +371,7 @@ class MountService : Service() {
                                 )
                                 server.start()
                                 ftpServers[a.id] = server
+                                AccountManager.registerPort(server.boundPort)
                                 LogBus.info("账户「${a.name}」FTP 监听 ${server.boundPort}（休眠，认证后激活）")
                             }
                         }

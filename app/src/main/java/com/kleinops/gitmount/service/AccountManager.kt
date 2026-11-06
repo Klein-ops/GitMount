@@ -123,10 +123,29 @@ object AccountManager {
     fun releaseAll() {
         entries.forEach { (id, _) -> release(id) }
         entries.clear()
+        registeredPorts.clear()
     }
 
     /** 当前已激活（持有 repo）的账户数——用于日志与调试 */
     fun activeCount(): Int = entries.values.count { it.repo != null }
+
+    // ---------- 账户监听端口登记（供 FTP PASV 选端口时避让） ----------
+
+    /** 全局已登记的被账户监听占用的端口（FTP 数据端口避让用），线程安全 */
+    private val registeredPorts = ConcurrentHashMap.newKeySet<Int>()
+
+    /** 登记账户监听端口（MountService 启动账户时调用） */
+    fun registerPort(port: Int) {
+        if (port > 0) registeredPorts.add(port)
+    }
+
+    /** 注销账户监听端口（MountService 停止账户时调用） */
+    fun unregisterPort(port: Int) {
+        registeredPorts.remove(port)
+    }
+
+    /** 当前所有被账户监听占用的端口快照 */
+    fun occupiedPorts(): Set<Int> = registeredPorts.toSet()
 
     /** 校验仓库可读（预检用）：失败抛 IOException */
     @Throws(IOException::class)

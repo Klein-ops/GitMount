@@ -372,7 +372,11 @@ class FtpServer(
 
         private fun openPassive() {
             closePassive()
-            val ps = ServerSocket(0, 1, socket.localAddress)
+            val ps = openPassiveSocket()
+            if (ps == null) {
+                reply(425, "无法建立被动数据连接（端口资源不足）")
+                return
+            }
             passiveServer = ps
             val p1 = ps.localPort / 256
             val p2 = ps.localPort % 256
@@ -382,9 +386,30 @@ class FtpServer(
 
         private fun openEpsv() {
             closePassive()
-            val ps = ServerSocket(0, 1, socket.localAddress)
+            val ps = openPassiveSocket()
+            if (ps == null) {
+                reply(425, "无法建立被动数据连接（端口资源不足）")
+                return
+            }
             passiveServer = ps
             reply(229, "进入扩展被动模式 (|||${ps.localPort}|)")
+        }
+
+        /**
+         * 打开被动数据监听端口。
+         * 避开所有账户的监听端口（AccountManager.occupiedPorts），防止 FTP
+         * 随机数据端口撞上其他账户的 WebDAV/FTP 监听端口导致连接被劫持。
+         * 最多尝试若干次，仍失败则返回 null 由上层回 425。
+         */
+        private fun openPassiveSocket(): ServerSocket? {
+            val occupied = AccountManager.occupiedPorts()
+            repeat(10) {
+                val ps = ServerSocket(0, 1, socket.localAddress)
+                val p = ps.localPort
+                if (p !in occupied) return ps
+                runCatching { ps.close() }
+            }
+            return null
         }
 
         private fun openActive(arg: String) {
