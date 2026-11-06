@@ -94,11 +94,18 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
     var showRepoList by remember { mutableStateOf(false) }
     var showCreateRepo by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var showServiceConfig by remember { mutableStateOf(false) }
     var showClearHistoryConfirm by remember { mutableStateOf(false) }
     /** 从仓库列表跳转新建时带入的令牌（可能尚未保存到 DataStore） */
     var createRepoToken by remember { mutableStateOf("") }
 
-    // 设置页独立成页面（不再用对话框），返回后回到主界面
+    // 服务配置页独立成页面（协议 / 端口 / 访问账号），返回后回到主界面
+    if (showServiceConfig) {
+        ServiceConfigScreen(vm = vm, onBack = { showServiceConfig = false })
+        return
+    }
+
+    // 设置页独立成页面（网络与后台类选项），返回后回到主界面
     if (showSettings) {
         SettingsScreen(vm = vm, onBack = { showSettings = false })
         return
@@ -243,7 +250,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                         Spacer(Modifier.height(12.dp))
                         Text(
                             if (server.loopbackOnly) {
-                                "当前仅本机可访问（只监听 127.0.0.1）。如需局域网访问，请在服务设置里关闭“仅本机访问”。"
+                                "当前仅本机可访问（只监听 127.0.0.1）。如需局域网访问，请在右上角设置里关闭“仅本机访问”。"
                             } else {
                                 "点击地址即可复制。局域网内其他设备用局域网地址访问；手机本机用 127.0.0.1 地址更稳定。"
                             },
@@ -255,7 +262,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                             if (settings.isConfigured) {
                                 "服务未启动。点击下方按钮开始提供服务。"
                             } else {
-                                "尚未配置仓库。请先点击右上角设置完成 GitHub 配置。"
+                                "尚未配置仓库。请先点击下方「仓库」按钮绑定 GitHub 仓库。"
                             },
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -308,7 +315,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                             }
                         }
                     }
-                    // 第二行：仓库 / 设置，各自打开对应页面（仓库配置已改为仓库列表）
+                    // 第二行：仓库 / 服务配置，各自打开对应页面（仓库配置已改为仓库列表）
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -325,12 +332,12 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                             Text("仓库", maxLines = 1)
                         }
                         FilledTonalButton(
-                            onClick = { showSettings = true },
+                            onClick = { showServiceConfig = true },
                             modifier = Modifier.weight(1f),
                         ) {
                             Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.width(18.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("设置", maxLines = 1)
+                            Text("服务配置", maxLines = 1)
                         }
                     }
                 }

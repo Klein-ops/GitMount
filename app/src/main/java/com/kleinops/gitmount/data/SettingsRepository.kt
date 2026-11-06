@@ -145,16 +145,16 @@ class SettingsRepository(private val context: Context) {
         }
     }
 
-    suspend fun saveServer(
+    /**
+     * 保存服务配置（服务协议 / 端口 / 访问账号）。
+     * 与网络后台类设置（仅本机访问、通知、自启动等）分离，见 [saveBackgroundSettings]。
+     */
+    suspend fun saveServiceConfig(
         mode: String,
         ftpPort: Int,
         webdavPort: Int,
         username: String,
         password: String,
-        loopbackOnly: Boolean,
-        hideNotification: Boolean,
-        autoStart: Boolean,
-        hideFromRecents: Boolean = false,
     ) {
         context.dataStore.edit { p ->
             p[Keys.MODE] = mode
@@ -162,10 +162,24 @@ class SettingsRepository(private val context: Context) {
             p[Keys.WEBDAV_PORT] = webdavPort
             p[Keys.USERNAME] = username
             p[Keys.PASSWORD] = password
+        }
+    }
+
+    /**
+     * 保存网络与后台类设置（仅本机访问、常驻通知、后台隐藏、自启动）。
+     * 由右上角「设置」页维护；服务本身运行参数（协议/端口/账号）在 [saveServiceConfig]。
+     */
+    suspend fun saveBackgroundSettings(
+        loopbackOnly: Boolean,
+        hideNotification: Boolean,
+        autoStart: Boolean,
+        hideFromRecents: Boolean = false,
+    ) {
+        context.dataStore.edit { p ->
             p[Keys.LOOPBACK_ONLY] = loopbackOnly
             p[Keys.HIDE_NOTIFICATION] = hideNotification
-            p[Keys.HIDE_FROM_RECENTS] = hideFromRecents
             p[Keys.AUTO_START] = autoStart
+            p[Keys.HIDE_FROM_RECENTS] = hideFromRecents
         }
     }
 

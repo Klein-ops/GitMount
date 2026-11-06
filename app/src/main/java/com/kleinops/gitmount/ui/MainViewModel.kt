@@ -283,16 +283,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun saveServerSettings(
+    /** 保存服务配置页的表单（服务协议 / 端口 / 访问账号），落盘完成后回调 */
+    fun saveServiceConfig(
         mode: ServerMode,
         ftpPort: Int,
         webdavPort: Int,
         username: String,
         password: String,
-        loopbackOnly: Boolean,
-        hideNotification: Boolean,
-        autoStart: Boolean,
-        hideFromRecents: Boolean,
         /** 落盘完成后回调（调用方据此再触发重启/返回，避免读到旧配置） */
         onSaved: () -> Unit = {},
     ) {
@@ -300,13 +297,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             LogBus.warn("访问账号或密码为空，服务启动后无法登录")
         }
         viewModelScope.launch {
-            settingsRepo.saveServer(
+            settingsRepo.saveServiceConfig(
                 mode.name, ftpPort, webdavPort, username, password,
+            )
+            LogBus.info(
+                "服务配置已保存：${mode.label} / 端口 ${if (mode == ServerMode.FTP) ftpPort else webdavPort} / 账号 $username"
+            )
+            onSaved()
+        }
+    }
+
+    /** 保存右上角设置页的网络与后台选项，落盘完成后回调 */
+    fun saveBackgroundSettings(
+        loopbackOnly: Boolean,
+        hideNotification: Boolean,
+        autoStart: Boolean,
+        hideFromRecents: Boolean,
+        onSaved: () -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            settingsRepo.saveBackgroundSettings(
                 loopbackOnly, hideNotification, autoStart, hideFromRecents,
             )
             LogBus.info(
-                "服务设置已保存：${mode.label} / 端口 ${if (mode == ServerMode.FTP) ftpPort else webdavPort} / " +
-                    "${if (loopbackOnly) "仅本机" else "局域网"} / " +
+                "后台设置已保存：${if (loopbackOnly) "仅本机" else "局域网"} / " +
                     "${if (hideNotification) "隐藏通知" else "常驻通知"} / " +
                     "${if (hideFromRecents) "后台隐藏" else "任务列表可见"} / " +
                     "${if (autoStart) "自启动开" else "自启动关"}"
