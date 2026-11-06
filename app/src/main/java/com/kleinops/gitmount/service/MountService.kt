@@ -17,8 +17,6 @@ import androidx.core.app.NotificationCompat
 import com.kleinops.gitmount.MainActivity
 import com.kleinops.gitmount.R
 import com.kleinops.gitmount.data.GitHubApiException
-import com.kleinops.gitmount.data.GitHubClient
-import com.kleinops.gitmount.data.GitRepository
 import com.kleinops.gitmount.data.ServerMode
 import com.kleinops.gitmount.data.SettingsRepository
 import com.kleinops.gitmount.service.http.HttpServer
@@ -48,8 +46,6 @@ class MountService : Service() {
         const val ACTION_START = "com.kleinops.gitmount.action.START"
         const val ACTION_STOP = "com.kleinops.gitmount.action.STOP"
         const val ACTION_RESTART = "com.kleinops.gitmount.action.RESTART"
-        const val EXTRA_MODE = "extra_mode"
-        const val EXTRA_PORT = "extra_port"
 
         /**
          * 启动流程整体超时：从设置读取 → 端口预检 → GitHub 连通性校验 → 拉起服务器，
@@ -62,14 +58,12 @@ class MountService : Service() {
         /** DataStore 读取超时：本地文件操作正常毫秒级，兜底防卡死 */
         private const val SETTINGS_READ_TIMEOUT_MS = 10_000L
 
-        /** 由 UI 调用：启动服务 */
-        fun start(context: Context, mode: ServerMode, port: Int) {
+        /** 由 UI 调用：启动服务（多账户架构下启动全部账户的监听；mode/port 仅保留兼容） */
+        fun start(context: Context, mode: ServerMode = ServerMode.WEBDAV, port: Int = 0) {
             // 记录用户意图：期望服务保持运行（进程被杀后据此自动恢复）
             persistIntent(context, enabled = true)
             val intent = Intent(context, MountService::class.java).apply {
                 action = ACTION_START
-                putExtra(EXTRA_MODE, mode.name)
-                putExtra(EXTRA_PORT, port)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -123,14 +117,11 @@ class MountService : Service() {
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var httpServer: HttpServer? = null
-    private var ftpServer: FtpServer? = null
+    /** 每个账户一个服务器实例：accountId -> HttpServer / FtpServer（空壳监听，认证后才激活仓库） */
+    private val httpServers = mutableMapOf<String, HttpServer>()
+    private val ftpServers = mutableMapOf<String, FtpServer>()
     private var startJob: Job? = null
     private lateinit var settingsRepo: SettingsRepository
-
-    /** 当前持有的仓库对象：供 onTrimMemory 释放缓存（空引用时直接跳过） */
-    @Volatile
-    private var repo: GitRepository? = null
 
     /** true = 隐藏前台服务常驻通知（用静默渠道），启动后从设置读取 */
     @Volatile
@@ -226,11 +217,8 @@ class MountService : Service() {
                 return START_STICKY
             }
             ACTION_START -> {
-                val mode = intent.getStringExtra(EXTRA_MODE)
-                    ?.let { runCatching { ServerMode.valueOf(it) }.getOrNull() }
-                    ?: ServerMode.WEBDAV
-                val port = intent.getIntExtra(EXTRA_PORT, defaultPort(mode))
-                startServers(mode, port)
+                // 多账户动态激活：启动全部账户的监听（空壳，认证后才激活仓库）
+                startServers()
             }
             else -> {
                 // 系统按 START_STICKY 重建服务（进程被杀后 intent 为 null 或 action 未知）。
@@ -254,10 +242,7 @@ class MountService : Service() {
                             NOTIF_ID,
                             buildNotification(getString(R.string.notif_starting), null, hiddenNotification),
                         )
-                        val mode = runCatching { ServerMode.valueOf(settings.mode) }
-                            .getOrDefault(ServerMode.WEBDAV)
-                        val port = if (mode == ServerMode.FTP) settings.ftpPort else settings.webdavPort
-                        startServers(mode, port)
+                        startServers()
                     } else {
                         LogBus.warn("无服务运行意图（用户未开启或已停止），保持停止")
                         stopSelf()
@@ -278,15 +263,11 @@ class MountService : Service() {
      */
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-        val r = repo
-        if (r != null && level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
-            r.forceRelease()
-            LogBus.info("系统内存压力回调（level=$level），已释放仓库缓存")
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
+            AccountManager.reclaimIdle()
+            LogBus.info("系统内存压力回调（level=$level），已回收空闲账户缓存")
         }
     }
-
-    private fun defaultPort(mode: ServerMode): Int =
-        if (mode == ServerMode.FTP) 2121 else 8080
 
     /**
      * 按最新保存的设置重启服务（先停旧服务器实例，再用新设置拉起）。
@@ -308,14 +289,11 @@ class MountService : Service() {
                 LogBus.warn("重启失败：尚未配置 GitHub 仓库信息")
                 return@launch
             }
-            val mode = runCatching { ServerMode.valueOf(settings.mode) }
-                .getOrDefault(ServerMode.WEBDAV)
-            val port = if (mode == ServerMode.FTP) settings.ftpPort else settings.webdavPort
-            startServers(mode, port)
+            startServers()
         }
     }
 
-    private fun startServers(mode: ServerMode, port: Int) {
+    private fun startServers() {
         if (ServerController.state.value.running || ServerController.state.value.starting) {
             LogBus.warn("服务已在运行，忽略重复启动")
             return
@@ -326,98 +304,97 @@ class MountService : Service() {
         startJob?.cancel()
         startJob = scope.launch {
             try {
-                LogBus.info("开始启动 ${mode.label} 服务（端口 $port）…")
+                LogBus.info("开始启动多账户服务…")
                 val completed = withTimeoutOrNull(START_TIMEOUT_MS) {
-                // DataStore 读取单独超时：本地文件读取正常毫秒级，
-                // 兜底防止 DataStore 初始化异常导致永久挂起（外层 120s 整体超时是最后防线）
-                val settings = withTimeoutOrNull(SETTINGS_READ_TIMEOUT_MS) {
-                    settingsRepo.settings.first()
-                } ?: throw IllegalStateException("读取配置超时，请重试")
-                if (!settings.isConfigured) {
-                    throw IllegalStateException("尚未配置 GitHub 仓库信息")
-                }
-                if (settings.username.isBlank() || settings.password.isBlank()) {
-                    throw IllegalStateException("请先设置访问用用户名与密码")
-                }
-                hiddenNotification = settings.hideNotification
+                    // DataStore 读取单独超时
+                    val settings = withTimeoutOrNull(SETTINGS_READ_TIMEOUT_MS) {
+                        settingsRepo.settings.first()
+                    } ?: throw IllegalStateException("读取配置超时，请重试")
+                    hiddenNotification = settings.hideNotification
 
-                // 启动前网络预检：无可用网络时立即失败，不发起 GitHub 请求。
-                // 自动启动（开机/START_STICKY 恢复/autoStart）常发生在后台或断网环境，
-                // 此时 api.github.com 的连接会长时间悬挂，表现为通知一直"正在启动"
-                // 数小时（实测 3.5 小时）。有网才走 GitHub 校验，无网立刻给出明确原因。
-                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                val active = cm.activeNetwork
-                val hasInternet = active != null && (
-                    cm.getNetworkCapabilities(active)
-                        ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
-                )
-                if (!hasInternet) {
-                    throw IOException("当前无可用网络，无法连接 GitHub，请联网后重试")
-                }
-
-                // 启动前先做端口占用预检：被占用时直接给出明确提示，
-                // 不再等到 bind 失败后靠异常文本猜测（旧实现在这步会卡在
-                // "无法解析的异常信息"，用户不知道是端口问题）。
-                val bindAddr = if (settings.loopbackOnly) "127.0.0.1" else null
-                if (!NetUtils.portAvailable(port, bindAddr)) {
-                    throw BindException("端口 $port 已被占用，请换一个端口或在设置里修改")
-                }
-
-                val client = GitHubClient(settings.token)
-                val repo = GitRepository(client, settings.owner, settings.repoName, settings.branch)
-                this@MountService.repo = repo
-
-                // 启动前做一次真实连通性校验，避免“显示已启动但实际不可用”
-                val probes = repo.visibleList("/")
-                LogBus.info("仓库连接正常，根目录 ${probes.size} 项")
-
-                val credentials = { settings.username to settings.password }
-                // loopbackOnly=true 时只监听 127.0.0.1，不暴露局域网
-                val lanIp = if (settings.loopbackOnly) null else NetUtils.lanIpv4()
-
-                val actualPort = when (mode) {
-                    ServerMode.WEBDAV -> {
-                        val handler = WebDavHandler(repo) { credentials() }
-                        val server = HttpServer(port, { exchange -> handler.handle(exchange) }, bindAddr)
-                        server.start()
-                        httpServer = server
-                        LogBus.info("WebDAV 服务已启动：http://$lanIp:${server.boundPort}/")
-                        server.boundPort
+                    val accounts = settings.accounts.filter { it.isConfigured }
+                    if (accounts.isEmpty()) {
+                        throw IllegalStateException("尚未配置任何账户，请先在 App 中添加账户并绑定仓库")
                     }
-                    ServerMode.FTP -> {
-                        val server = FtpServer(
-                            port = port,
-                            repo = repo,
-                            credentials = credentials,
-                            logger = { msg -> LogBus.info(msg) },
-                            bindAddress = bindAddr,
-                        )
-                        server.start()
-                        ftpServer = server
-                        LogBus.info("FTP 服务已启动：ftp://$lanIp:${server.boundPort}/")
-                        server.boundPort
-                    }
-                }
 
-                ServerController.setState(
-                    ServerController.State(
-                        running = true,
-                        starting = false,
-                        mode = mode,
-                        port = actualPort,
-                        lanIp = lanIp,
-                        username = settings.username,
-                        password = settings.password,
-                        loopbackOnly = settings.loopbackOnly,
+                    // 启动前网络预检：无可用网络时立即失败，不发起 GitHub 请求
+                    val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                    val active = cm.activeNetwork
+                    val hasInternet = active != null && (
+                        cm.getNetworkCapabilities(active)
+                            ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
                     )
-                )
-                updateNotification(
-                    getString(R.string.notif_running, mode.label, actualPort),
-                    endpointText(mode, lanIp, actualPort),
-                )
+                    if (!hasInternet) {
+                        throw IOException("当前无可用网络，无法连接 GitHub，请联网后重试")
+                    }
+
+                    // 端口冲突检测：相同协议端口不能有两个账户同时绑定（用户明确要求）
+                    val usedPorts = mutableMapOf<Pair<ServerMode, Int>, String>()
+                    accounts.forEach { a ->
+                        val am = runCatching { ServerMode.valueOf(a.mode) }.getOrDefault(ServerMode.WEBDAV)
+                        val key = am to a.port
+                        usedPorts[key]?.let { other ->
+                            throw BindException("端口 ${a.port} 已被账户「$other」占用，请为账户「${a.name}」换一个端口")
+                        }
+                        usedPorts[key] = a.name
+                    }
+
+                    val bindAddr = if (settings.loopbackOnly) "127.0.0.1" else null
+                    val lanIp = if (settings.loopbackOnly) null else NetUtils.lanIpv4()
+
+                    // 为每个账户起空壳监听（不建仓库；认证通过后经 AccountManager 懒激活）
+                    accounts.forEach { a ->
+                        val am = runCatching { ServerMode.valueOf(a.mode) }.getOrDefault(ServerMode.WEBDAV)
+                        val credentials = { a.username to a.password }
+                        when (am) {
+                            ServerMode.WEBDAV -> {
+                                val handler = WebDavHandler(
+                                    accountId = a.id,
+                                    repoProvider = { AccountManager.getRepoBlocking(a) },
+                                    authUser = credentials,
+                                )
+                                val server = HttpServer(a.webdavPort, { exchange -> handler.handle(exchange) }, bindAddr)
+                                server.start()
+                                httpServers[a.id] = server
+                                LogBus.info("账户「${a.name}」WebDAV 监听 ${server.boundPort}（休眠，认证后激活）")
+                            }
+                            ServerMode.FTP -> {
+                                val server = FtpServer(
+                                    port = a.ftpPort,
+                                    accountId = a.id,
+                                    repoProvider = { AccountManager.getRepoBlocking(a) },
+                                    credentials = credentials,
+                                    logger = { msg -> LogBus.info(msg) },
+                                    bindAddress = bindAddr,
+                                )
+                                server.start()
+                                ftpServers[a.id] = server
+                                LogBus.info("账户「${a.name}」FTP 监听 ${server.boundPort}（休眠，认证后激活）")
+                            }
+                        }
+                    }
+
+                    // 状态与通知：以激活账户为主展示
+                    val main = settings.activeAccount ?: accounts.first()
+                    val mainMode = runCatching { ServerMode.valueOf(main.mode) }.getOrDefault(ServerMode.WEBDAV)
+                    ServerController.setState(
+                        ServerController.State(
+                            running = true,
+                            starting = false,
+                            mode = mainMode,
+                            port = main.port,
+                            lanIp = lanIp,
+                            username = main.username,
+                            password = main.password,
+                            loopbackOnly = settings.loopbackOnly,
+                        )
+                    )
+                    updateNotification(
+                        getString(R.string.notif_running, mainMode.label, main.port),
+                        endpointText(mainMode, lanIp, main.port),
+                    )
                 }
-                // 整个启动流程超时兜底：任何一步卡住（DataStore 读、GitHub 连通性
-                // 校验、系统冻结）都不允许永久悬挂"正在启动"，超时收敛为明确失败。
+                // 整个启动流程超时兜底
                 if (completed == null) {
                     throw IllegalStateException("启动超时（${START_TIMEOUT_MS / 1000} 秒），请检查网络后重试")
                 }
@@ -425,14 +402,11 @@ class MountService : Service() {
                 val reason = startFailureReason(e)
                 LogBus.error("启动失败：$reason")
                 updateNotification(getString(R.string.notif_stopped), reason)
-                // 先清理（reset 会清空状态），再把错误写回去，否则 UI 永远看不到失败原因
                 shutdownServers()
                 ServerController.setState(
                     ServerController.State(
                         running = false,
                         starting = false,
-                        mode = mode,
-                        port = port,
                         error = reason,
                     )
                 )
@@ -465,21 +439,16 @@ class MountService : Service() {
     }
 
     private fun shutdownServers(keepForeground: Boolean = false) {
-        try {
-            httpServer?.stop()
-        } catch (e: Exception) {
-            LogBus.warn("停止 WebDAV 异常：${e.message}")
+        httpServers.values.forEach { s ->
+            runCatching { s.stop() }.onFailure { LogBus.warn("停止 WebDAV 异常：${it.message}") }
         }
-        httpServer = null
-        try {
-            ftpServer?.stop()
-        } catch (e: Exception) {
-            LogBus.warn("停止 FTP 异常：${e.message}")
+        httpServers.clear()
+        ftpServers.values.forEach { s ->
+            runCatching { s.stop() }.onFailure { LogBus.warn("停止 FTP 异常：${it.message}") }
         }
-        ftpServer = null
-        // 释放仓库对象（含其全部缓存），避免停止服务后仍被 Service 持有
-        repo?.forceRelease()
-        repo = null
+        ftpServers.clear()
+        // 释放全部账户仓库缓存（含其全部缓存），避免停止服务后仍被引用
+        AccountManager.releaseAll()
         if (ServerController.state.value.running || ServerController.state.value.starting) {
             LogBus.info("服务已停止")
         }

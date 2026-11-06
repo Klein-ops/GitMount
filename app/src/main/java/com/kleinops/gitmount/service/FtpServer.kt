@@ -29,15 +29,24 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   且该服务默认只监听局域网，配合账号密码已能满足个人使用。
  * - 数据连接支持 PASV/EPSV（客户端主流）与 PORT（主动模式）。
  * - 所有文件操作统一走 GitRepository，与 WebDAV 共享同一套语义。
+ *
+ * 多账户动态激活：repo 通过 repoProvider 懒获取（AccountManager 缓存），
+ * 认证通过前不碰仓库；认证通过后第一次仓库操作才激活账户并缓存到会话。
+ * 会话全程占用账户活跃标记（beginOp），大文件传输期间不会被空闲回收误伤。
  */
 class FtpServer(
     private val port: Int,
-    private val repo: GitRepository,
+    private val accountId: String,
+    private val repoProvider: () -> GitRepository,
     private val credentials: () -> Pair<String, String>,
     private val logger: (String) -> Unit = {},
     /** 绑定地址；null = 监听所有网卡（局域网），127.0.0.1 = 仅本机 */
     private val bindAddress: String? = null,
 ) {
+    /** 账户仓库（懒获取，缓存在会话级，避免每命令走 provider 的同步锁） */
+    private var sessionRepo: GitRepository? = null
+    private val repo: GitRepository
+        get() = sessionRepo ?: repoProvider().also { sessionRepo = it }
     private var serverSocket: ServerSocket? = null
     private val running = AtomicBoolean(false)
     /**
@@ -67,9 +76,13 @@ class FtpServer(
                     val socket = ss.accept()
                     pool.execute {
                         ServerController.sessionOpened()
+                        // 会话级活跃占用：连接建立→断开全程占用账户标记，
+                        // 防止长连接/传输期间该账户被空闲回收仓库缓存
+                        AccountManager.beginOp(accountId)
                         try {
                             FtpSession(socket).run()
                         } finally {
+                            AccountManager.endOp(accountId)
                             ServerController.sessionClosed()
                         }
                     }
@@ -289,7 +302,15 @@ class FtpServer(
             }
             if (pendingUser == user && pass == password) {
                 authenticated = true
-                reply(230, "登录成功")
+                // 认证通过：立即激活该账户（建 repo + 连通性探测）。
+                // 失败时提示账户不可用，但保持已认证（仓库操作时再报），
+                // 避免客户端反复 USER/PASS 重试。
+                try {
+                    repoProvider()
+                    reply(230, "登录成功")
+                } catch (e: Exception) {
+                    reply(230, "登录成功（仓库暂不可用：${e.message}）")
+                }
             } else {
                 reply(530, "用户名或密码错误")
             }

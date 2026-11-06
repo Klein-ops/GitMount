@@ -20,15 +20,23 @@ import java.util.UUID
  * - MOVE / COPY（读-写-删）
  * - LOCK / UNLOCK（乐观响应，保证 Windows 资源管理器等客户端可用）
  *
- * 认证：HTTP Basic（用户名/密码在设置页配置，空密码一律拒绝）。
+ * 认证：HTTP Basic（用户名/密码在账户配置里，空密码一律拒绝）。
+ *
+ * 多账户动态激活：repo 通过 repoProvider 懒获取（AccountManager 缓存），
+ * 认证前不触发 GitHub 请求；认证通过后的第一个仓库操作才激活账户。
  */
 class WebDavHandler(
-    private val repo: GitRepository,
+    private val accountId: String,
+    private val repoProvider: () -> GitRepository,
     private val authUser: () -> Pair<String, String>,
 ) {
+    /** repo 改为按需获取：绑定账户激活（缓存在 AccountManager） */
+    private val repo: GitRepository get() = repoProvider()
 
     fun handle(exchange: HttpExchange) {
         if (!checkAuth(exchange)) return
+        // 认证通过：刷新该账户活跃时间（防止"登录后挂着不动"被空闲回收误伤）
+        AccountManager.touch(accountId)
 
         when (exchange.method) {
             "OPTIONS" -> handleOptions(exchange)
