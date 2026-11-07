@@ -20,6 +20,7 @@ import com.kleinops.gitmount.data.GitHubApiException
 import com.kleinops.gitmount.data.ServerMode
 import com.kleinops.gitmount.data.SettingsRepository
 import com.kleinops.gitmount.service.http.HttpServer
+import java.io.IOException
 import java.net.BindException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers

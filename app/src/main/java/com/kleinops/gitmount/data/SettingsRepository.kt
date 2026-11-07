@@ -137,7 +137,7 @@ class SettingsRepository(private val context: Context) {
         // 多账户：优先读 accounts_json；为空则把旧的单账户配置迁移成第一个账户
         val accounts = parseAccountsJson(p[Keys.ACCOUNTS_JSON])
             .takeIf { it.isNotEmpty() }
-            ?: legacySingleAccount(p).takeIf { it.isConfigured }?.let { listOf(it) }
+            ?: legacySingleAccount(p)?.takeIf { it.isConfigured }?.let { listOf(it) }
             ?: emptyList()
         val activeId = p[Keys.ACTIVE_ACCOUNT_ID]
             ?.takeIf { id -> accounts.any { it.id == id } }
