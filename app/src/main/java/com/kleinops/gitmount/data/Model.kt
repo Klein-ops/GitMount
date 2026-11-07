@@ -41,6 +41,16 @@ data class AccountConfig(
     /** 当前生效的端口（按协议） */
     val port: Int
         get() = if (mode == "FTP") ftpPort else webdavPort
+
+    /**
+     * 该账户实际使用的 GitHub 令牌：账户独立令牌为空时回退到全局共享令牌。
+     * @param sharedToken 全局共享令牌（见 AppSettings.sharedToken）
+     */
+    fun effectiveToken(sharedToken: String): String = token.ifBlank { sharedToken }
+
+    /** 账户是否可提供服务：仓库已绑定且生效令牌非空 */
+    fun isUsable(sharedToken: String): Boolean =
+        effectiveToken(sharedToken).isNotBlank() && owner.isNotBlank() && repoName.isNotBlank()
 }
 
 /** 服务运行状态 */

@@ -38,8 +38,9 @@ object AccountManager {
      * 同步获取账户仓库对象（工作线程调用）。首次创建并探测（0.5~2s），
      * 之后命中缓存开销可忽略。双检锁保证每账户单实例，FTP 与 WebDAV
      * 共享同一把写锁的语义保持不变。
+     * @param sharedToken 全局共享令牌：账户独立令牌为空时用它（见 AccountConfig.effectiveToken）
      */
-    fun getRepoBlocking(account: AccountConfig): GitRepository {
+    fun getRepoBlocking(account: AccountConfig, sharedToken: String = ""): GitRepository {
         val id = account.id
         entries[id]?.repo?.let { entries[id]?.touch(); return it }
         synchronized(createLock) {
@@ -47,7 +48,8 @@ object AccountManager {
             val entry = entries.getOrPut(id) { ActiveEntry() }
             entry.activeOps++
             try {
-                val repo = GitRepository(GitHubClient(account.token), account.owner, account.repoName, account.branch)
+                val token = account.effectiveToken(sharedToken)
+                val repo = GitRepository(GitHubClient(token), account.owner, account.repoName, account.branch)
                 repo.visibleList("/") // 连通性探测：确保仓库真实可读
                 entry.repo = repo
                 entry.touch()
@@ -128,6 +130,9 @@ object AccountManager {
 
     /** 当前已激活（持有 repo）的账户数——用于日志与调试 */
     fun activeCount(): Int = entries.values.count { it.repo != null }
+
+    /** 指定账户当前是否已激活（持有 repo 缓存）——供 UI 展示"活跃/休眠"状态 */
+    fun isActive(accountId: String): Boolean = entries[accountId]?.repo != null
 
     // ---------- 账户监听端口登记（供 FTP PASV 选端口时避让） ----------
 

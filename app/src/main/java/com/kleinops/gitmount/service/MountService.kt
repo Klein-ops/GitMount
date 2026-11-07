@@ -313,7 +313,7 @@ class MountService : Service() {
                     } ?: throw IllegalStateException("读取配置超时，请重试")
                     hiddenNotification = settings.hideNotification
 
-                    val accounts = settings.accounts.filter { it.isConfigured }
+                    val accounts = settings.accounts.filter { it.isUsable(settings.sharedToken) }
                     if (accounts.isEmpty()) {
                         throw IllegalStateException("尚未配置任何账户，请先在 App 中添加账户并绑定仓库")
                     }
@@ -347,11 +347,12 @@ class MountService : Service() {
                     accounts.forEach { a ->
                         val am = runCatching { ServerMode.valueOf(a.mode) }.getOrDefault(ServerMode.WEBDAV)
                         val credentials = { a.username to a.password }
+                        val shared = settings.sharedToken
                         when (am) {
                             ServerMode.WEBDAV -> {
                                 val handler = WebDavHandler(
                                     accountId = a.id,
-                                    repoProvider = { AccountManager.getRepoBlocking(a) },
+                                    repoProvider = { AccountManager.getRepoBlocking(a, shared) },
                                     authUser = credentials,
                                 )
                                 val server = HttpServer(a.webdavPort, { exchange -> handler.handle(exchange) }, bindAddr)
@@ -365,7 +366,7 @@ class MountService : Service() {
                                 val server = FtpServer(
                                     port = a.ftpPort,
                                     accountId = a.id,
-                                    repoProvider = { AccountManager.getRepoBlocking(a) },
+                                    repoProvider = { AccountManager.getRepoBlocking(a, shared) },
                                     credentials = credentials,
                                     logger = { msg -> LogBus.info(msg) },
                                     bindAddress = bindAddr,

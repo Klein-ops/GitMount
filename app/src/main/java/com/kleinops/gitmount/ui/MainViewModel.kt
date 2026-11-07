@@ -366,6 +366,31 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * 保存账户的完整配置（名称 / 协议 / 端口 / 访问账号 / 独立令牌 / 仓库绑定）。
+     * 账户页直接编辑，无需先"切换激活账户"再去其他页面改。
+     * @param onSaved 落盘完成后回调（UI 据此决定是否重启服务 / 返回）
+     */
+    fun updateAccount(
+        account: com.kleinops.gitmount.data.AccountConfig,
+        onSaved: () -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            settingsRepo.saveAccount(account, activate = false)
+            LogBus.info("账户「${account.name}」配置已保存")
+            onSaved()
+        }
+    }
+
+    /** 保存全局共享 GitHub 令牌（所有账户默认共用；账户独立令牌留空即继承） */
+    fun saveSharedToken(token: String, onSaved: () -> Unit = {}) {
+        viewModelScope.launch {
+            settingsRepo.saveSharedToken(token.trim())
+            LogBus.info(if (token.isBlank()) "已清除共享 GitHub 令牌" else "已更新共享 GitHub 令牌")
+            onSaved()
+        }
+    }
+
     /** 删除账户（若删的是激活账户，激活回退到剩余第一个） */
     fun deleteAccount(id: String) {
         viewModelScope.launch {

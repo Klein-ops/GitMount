@@ -68,6 +68,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.kleinops.gitmount.data.ServerMode
+import com.kleinops.gitmount.service.AccountManager
 import com.kleinops.gitmount.service.LogBus
 import com.kleinops.gitmount.service.MountService
 import com.kleinops.gitmount.ui.components.ClickableInfoRow
@@ -96,24 +97,16 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
     var showRepoList by remember { mutableStateOf(false) }
     var showCreateRepo by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
-    var showServiceConfig by remember { mutableStateOf(false) }
     var showAccountList by remember { mutableStateOf(false) }
     var showClearHistoryConfirm by remember { mutableStateOf(false) }
     /** 从仓库列表跳转新建时带入的令牌（可能尚未保存到 DataStore） */
     var createRepoToken by remember { mutableStateOf("") }
 
-    // 账户管理页（多账户：新建/切换/重命名/删除）
+    // 账户管理页（多账户：新建/切换/编辑完整配置/删除）
     if (showAccountList) {
         // 系统返回键：回到主界面而不是退出应用
         BackHandler { showAccountList = false }
         AccountListScreen(vm = vm, onBack = { showAccountList = false })
-        return
-    }
-
-    // 服务配置页独立成页面（协议 / 端口 / 访问账号），返回后回到主界面
-    if (showServiceConfig) {
-        BackHandler { showServiceConfig = false }
-        ServiceConfigScreen(vm = vm, onBack = { showServiceConfig = false })
         return
     }
 
@@ -232,32 +225,28 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                             cm.setPrimaryClip(ClipData.newPlainText("GitMount 地址", text))
                             scope.launch { snackbar.showSnackbar("$label 已复制到剪贴板") }
                         }
-                        if (server.loopbackOnly) {
-                            // 仅本机模式：只展示回环地址
-                            ClickableInfoRow(
-                                label = "本机地址",
-                                value = server.loopbackEndpoint ?: "未知",
-                                mono = true,
-                                onClick = { server.loopbackEndpoint?.let { copyToClipboard(it, "本机地址") } },
-                            )
-                        } else {
-                            ClickableInfoRow(
-                                label = "局域网地址",
-                                value = server.endpoint ?: "未知",
-                                mono = true,
-                                onClick = { server.endpoint?.let { copyToClipboard(it, "局域网地址") } },
-                            )
-                            ClickableInfoRow(
-                                label = "本机地址",
-                                value = server.loopbackEndpoint ?: "未知",
-                                mono = true,
-                                onClick = { server.loopbackEndpoint?.let { copyToClipboard(it, "本机地址") } },
-                            )
+                        // 多账户：列出全部账户的监听端口与地址（服务为每个账户独立监听）
+                        val baseIp = if (server.loopbackOnly) "127.0.0.1" else (server.lanIp ?: "127.0.0.1")
+                        settings.accounts.filter { it.isUsable(settings.sharedToken) }.forEach { acc ->
+                            val mode = runCatching { ServerMode.valueOf(acc.mode) }.getOrDefault(ServerMode.WEBDAV)
+                            val addr = if (mode == ServerMode.WEBDAV) "http://$baseIp:${acc.port}/" else "ftp://$baseIp:${acc.port}/"
+                            val activeNow = AccountManager.isActive(acc.id)
+                            // 每个账户一张子卡：名称+状态 / 仓库 / 地址（可复制）
+                            SectionCard(
+                                title = "${acc.name} ｜ ${mode.label} : ${acc.port} · ${if (activeNow) "活跃" else "休眠"}",
+                            ) {
+                                InfoRow("仓库", acc.repoLabel, mono = true)
+                                InfoRow("用户名", acc.username, mono = true)
+                                InfoRow("密码", "••••••", mono = true)
+                                ClickableInfoRow(
+                                    label = "访问地址",
+                                    value = addr,
+                                    mono = true,
+                                    onClick = { copyToClipboard(addr, "${acc.name} 地址") },
+                                )
+                            }
+                            Spacer(Modifier.height(8.dp))
                         }
-                        InfoRow("协议", server.mode.label)
-                        InfoRow("端口", server.port.toString(), mono = true)
-                        InfoRow("用户名", server.username, mono = true)
-                        InfoRow("密码", "••••••", mono = true)
                         if (server.activeSessions > 0 || server.totalBytes > 0) {
                             InfoRow("活跃会话", server.activeSessions.toString(), mono = true)
                             InfoRow("已传流量", formatBytes(server.totalBytes), mono = true)
@@ -330,7 +319,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                             }
                         }
                     }
-                    // 第二行：仓库 / 服务配置（各占半行，避免三按钮挤压导致文字被压没）
+                    // 第二行：仓库 / 账户（账户页可编辑账户协议、端口、账号与共享令牌）
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -347,23 +336,8 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                             Text("仓库", maxLines = 1)
                         }
                         FilledTonalButton(
-                            onClick = { showServiceConfig = true },
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.width(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("服务配置", maxLines = 1)
-                        }
-                    }
-                    // 第三行：账户（独占整行）
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 0.dp),
-                    ) {
-                        FilledTonalButton(
                             onClick = { showAccountList = true },
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier.weight(1f),
                         ) {
                             Icon(Icons.Filled.Person, contentDescription = null, modifier = Modifier.width(18.dp))
                             Spacer(Modifier.width(6.dp))

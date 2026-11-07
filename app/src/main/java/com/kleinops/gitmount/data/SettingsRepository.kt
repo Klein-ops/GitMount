@@ -42,17 +42,25 @@ data class AppSettings(
     val accounts: List<AccountConfig> = emptyList(),
     /** 当前激活账户 id（UI 以"当前账户"视角编辑配置；服务端同时监听全部账户端口） */
     val activeAccountId: String = "",
+    /**
+     * 全局共享 GitHub 令牌（Keystore 加密后落盘）：所有账户默认共用同一个 GitHub API 令牌。
+     * 账户的独立令牌为空时自动继承共享令牌；需要独立的账户可在账户编辑里单独填写。
+     * 绑定/新建仓库时填的令牌会自动成为共享令牌（同时写进当前账户）。
+     */
+    val sharedToken: String = "",
 ) {
     /** 当前激活账户；无账户或 id 失配时回退到第一个账户 */
     val activeAccount: AccountConfig?
         get() = accounts.find { it.id == activeAccountId } ?: accounts.firstOrNull()
 
+    /** 当前激活账户是否可提供服务（仓库已绑定且生效令牌非空） */
     val isConfigured: Boolean
-        get() = activeAccount?.isConfigured == true
+        get() = activeAccount?.let { it.isUsable(sharedToken) } == true
 
     // ---------- 以下为"当前账户"的代理 getter（保持旧代码的 settings.token/owner/... 调用不变） ----------
 
-    val token: String get() = activeAccount?.token ?: ""
+    /** 当前账户的生效 GitHub 令牌：账户独立令牌为空时回退到全局共享令牌 */
+    val token: String get() = activeAccount?.effectiveToken(sharedToken) ?: ""
     val owner: String get() = activeAccount?.owner ?: ""
     val repoName: String get() = activeAccount?.repoName ?: ""
     val branch: String get() = activeAccount?.branch ?: "main"
@@ -131,6 +139,8 @@ class SettingsRepository(private val context: Context) {
         // 多账户存储：JSON 数组（账户字段水平冗余在每条记录里，token 逐账户加密）
         val ACCOUNTS_JSON = stringPreferencesKey("accounts_json")
         val ACTIVE_ACCOUNT_ID = stringPreferencesKey("active_account_id")
+        // 全局共享 GitHub 令牌（所有账户默认共用；账户 token 为空即继承）
+        val SHARED_TOKEN = stringPreferencesKey("shared_token_enc")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { p ->
@@ -143,6 +153,10 @@ class SettingsRepository(private val context: Context) {
             ?.takeIf { id -> accounts.any { it.id == id } }
             ?: accounts.firstOrNull()?.id
             ?: ""
+        // 共享令牌：优先读已存的共享令牌；老版本迁移场景（有账户但无共享令牌）时，
+        // 用第一个已配置账户的令牌作为共享令牌，保证"所有账户默认共享"开箱即用。
+        val sharedToken = TokenCrypto.decrypt(p[Keys.SHARED_TOKEN] ?: "")
+            .ifBlank { accounts.firstOrNull { it.token.isNotBlank() }?.token ?: "" }
         AppSettings(
             loopbackOnly = p[Keys.LOOPBACK_ONLY] ?: false,
             hideNotification = p[Keys.HIDE_NOTIFICATION] ?: true,
@@ -151,6 +165,7 @@ class SettingsRepository(private val context: Context) {
             serviceEnabled = p[Keys.SERVICE_ENABLED] ?: false,
             accounts = accounts,
             activeAccountId = activeId,
+            sharedToken = sharedToken,
         )
     }
 
@@ -209,10 +224,12 @@ class SettingsRepository(private val context: Context) {
             val activeId = p[Keys.ACTIVE_ACCOUNT_ID]
                 ?.takeIf { id -> current.any { it.id == id } }
                 ?: current.firstOrNull()?.id
+            // 绑定仓库时填的令牌自动成为全局共享令牌；账户独立令牌置空（继承共享）——
+            // 这样所有账户默认共用同一个 GitHub API，需要独立的账户再在账户编辑里单独填。
             val accounts = if (activeId != null) {
                 current.map { a ->
                     if (a.id == activeId) {
-                        a.copy(token = token, owner = owner, repoName = repo, branch = branch)
+                        a.copy(token = "", owner = owner, repoName = repo, branch = branch)
                     } else a
                 }
             } else {
@@ -220,7 +237,7 @@ class SettingsRepository(private val context: Context) {
                     AccountConfig(
                         id = "default",
                         name = "默认账户",
-                        token = token,
+                        token = "",
                         owner = owner,
                         repoName = repo,
                         branch = branch,
@@ -230,6 +247,20 @@ class SettingsRepository(private val context: Context) {
             p[Keys.ACCOUNTS_JSON] = writeAccountsJson(accounts)
             if (p[Keys.ACTIVE_ACCOUNT_ID].isNullOrBlank() || accounts.none { it.id == p[Keys.ACTIVE_ACCOUNT_ID] }) {
                 p[Keys.ACTIVE_ACCOUNT_ID] = accounts.first().id
+            }
+            if (token.isNotBlank()) {
+                p[Keys.SHARED_TOKEN] = TokenCrypto.encrypt(token)
+            }
+        }
+    }
+
+    /** 保存全局共享 GitHub 令牌（所有账户默认共用；账户 token 为空即继承） */
+    suspend fun saveSharedToken(token: String) {
+        context.dataStore.edit { p ->
+            if (token.isBlank()) {
+                p.remove(Keys.SHARED_TOKEN)
+            } else {
+                p[Keys.SHARED_TOKEN] = TokenCrypto.encrypt(token)
             }
         }
     }
