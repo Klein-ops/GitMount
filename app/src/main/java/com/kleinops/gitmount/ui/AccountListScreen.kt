@@ -333,6 +333,7 @@ private fun AccountNameDialog(
  * 账户完整配置编辑对话框：名称 / 协议 / 端口 / 访问账号 / 独立令牌（留空=继承共享）。
  * 保存后由调用方统一处理服务重启。
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AccountEditDialog(
     account: AccountConfig,
