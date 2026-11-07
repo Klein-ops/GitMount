@@ -315,6 +315,8 @@ class FtpServer(
                     reply(230, "登录成功（仓库暂不可用：${e.message}）")
                 }
             } else {
+                // 登录失败：低频但重要，记一条 warn 便于排查（认证错误/半配置）
+                LogBus.warn("FTP 登录失败：用户 ${pendingUser ?: "(未填)"} 认证未通过")
                 reply(530, "用户名或密码错误")
             }
         }

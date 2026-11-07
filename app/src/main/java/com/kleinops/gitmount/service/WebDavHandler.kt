@@ -51,6 +51,15 @@ class WebDavHandler(
             "UNLOCK" -> handleUnlock(exchange)
             else -> exchange.respond(405)
         }
+
+        // 低频摘要日志：只记录写操作与异常响应，读操作（OPTIONS/PROPFIND/GET/HEAD/LOCK/UNLOCK）
+        // 完全静默——文件管理器的 PROPFIND 会高频轮询目录，全记会把日志刷爆。
+        val status = exchange.status
+        if (status >= 400) {
+            LogBus.warn("WebDAV ${exchange.method} ${exchange.path} → $status")
+        } else if (exchange.method in setOf("PUT", "DELETE", "MKCOL", "MOVE", "COPY")) {
+            LogBus.info("WebDAV ${exchange.method} ${exchange.path} → $status")
+        }
     }
 
     // ---------- 认证 ----------
