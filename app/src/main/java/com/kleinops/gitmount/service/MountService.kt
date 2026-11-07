@@ -131,6 +131,15 @@ class MountService : Service() {
     /** 网络变化监听：Wi-Fi 断开/重连、IP 变更时自动刷新通知里的端点地址 */
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
+    /**
+     * 网络回调去抖：onCapabilitiesChanged 在连接稳定后仍会高频回调（网络能力
+     * 反复变化），若每次都刷新+打日志会刷屏。这里要求 IP 实际变化才刷新，
+     * IP 未变时完全静默（不打日志、不更新通知）。
+     */
+    @Volatile
+    private var lastNetworkRefreshMs = 0L
+    private val NETWORK_REFRESH_DEBOUNCE_MS = 2_000L
+
     override fun onCreate() {
         super.onCreate()
         settingsRepo = SettingsRepository(applicationContext)
@@ -178,21 +187,24 @@ class MountService : Service() {
         }
     }
 
-    /** 网络变化后：若服务在运行，重新计算局域网 IP 并刷新通知（不重启服务、不影响已有连接） */
+    /** 网络变化后：若服务在运行，重新计算局域网 IP 并刷新通知（不重启服务、不影响已有连接）。
+     *  去抖 + IP 未变静默：onCapabilitiesChanged 高频回调时不再刷日志。 */
     private fun refreshEndpointAfterNetworkChange() {
         val st = ServerController.state.value
         if (!st.running || st.loopbackOnly) return
+        val now = System.currentTimeMillis()
+        if (now - lastNetworkRefreshMs < NETWORK_REFRESH_DEBOUNCE_MS) return
+        lastNetworkRefreshMs = now
         val newIp = NetUtils.lanIpv4()
         val oldIp = st.lanIp
+        if (newIp == oldIp) return // IP 未变：完全静默，不刷新不记日志
         LogBus.info("网络状态变化，IP: ${oldIp ?: "无"} → ${newIp ?: "无"}")
-        if (newIp != oldIp) {
-            ServerController.update { it.copy(lanIp = newIp) }
-            if (newIp != null) {
-                updateNotification(
-                    getString(R.string.notif_running, st.mode.label, st.port),
-                    endpointText(st.mode, newIp, st.port),
-                )
-            }
+        ServerController.update { it.copy(lanIp = newIp) }
+        if (newIp != null) {
+            updateNotification(
+                getString(R.string.notif_running, st.mode.label, st.port),
+                endpointText(st.mode, newIp, st.port),
+            )
         }
     }
 
