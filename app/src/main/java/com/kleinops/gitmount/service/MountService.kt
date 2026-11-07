@@ -264,7 +264,7 @@ class MountService : Service() {
         super.onTrimMemory(level)
         if (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
             AccountManager.reclaimIdle()
-            LogBus.info("系统内存压力回调（level=$level），已回收空闲账户缓存")
+            LogBus.info("系统内存压力回调（level=$level），已回收空闲挂载点缓存")
         }
     }
 
@@ -303,7 +303,7 @@ class MountService : Service() {
         startJob?.cancel()
         startJob = scope.launch {
             try {
-                LogBus.info("开始启动多账户服务…")
+                LogBus.info("开始启动多挂载点服务…")
                 val completed = withTimeoutOrNull(START_TIMEOUT_MS) {
                     // DataStore 读取单独超时
                     val settings = withTimeoutOrNull(SETTINGS_READ_TIMEOUT_MS) {
@@ -315,9 +315,9 @@ class MountService : Service() {
                     if (accounts.isEmpty()) {
                         // 区分两种空：一个账户都没有，还是有账户但全被停用/未配置
                         val reason = if (settings.accounts.isEmpty()) {
-                            "尚未配置任何账户，请先在「账户」页新建账户并绑定仓库"
+                            "尚未配置任何挂载点，请先在「挂载点」页新建挂载点并绑定仓库"
                         } else {
-                            "没有可启动的账户：请检查账户开关是否开启、是否已绑定仓库"
+                            "没有可启动的挂载点：请检查挂载点开关是否开启、是否已绑定仓库"
                         }
                         throw IllegalStateException(reason)
                     }
@@ -339,7 +339,7 @@ class MountService : Service() {
                         val am = runCatching { ServerMode.valueOf(a.mode) }.getOrDefault(ServerMode.WEBDAV)
                         val key = am to a.port
                         usedPorts[key]?.let { other ->
-                            throw BindException("端口 ${a.port} 已被账户「$other」占用，请为账户「${a.name}」换一个端口")
+                            throw BindException("端口 ${a.port} 已被挂载点「$other」占用，请为挂载点「${a.name}」换一个端口")
                         }
                         usedPorts[key] = a.name
                     }
@@ -364,7 +364,7 @@ class MountService : Service() {
                                 httpServers[a.id] = server
                                 // 登记监听端口：FTP PASV 选数据端口时避让，防止数据端口撞上账户监听端口
                                 AccountManager.registerPort(server.boundPort)
-                                LogBus.info("账户「${a.name}」WebDAV 监听 ${server.boundPort}（休眠，认证后激活）")
+                                LogBus.info("挂载点「${a.name}」WebDAV 监听 ${server.boundPort}（休眠，认证后激活）")
                             }
                             ServerMode.FTP -> {
                                 val server = FtpServer(
@@ -378,7 +378,7 @@ class MountService : Service() {
                                 server.start()
                                 ftpServers[a.id] = server
                                 AccountManager.registerPort(server.boundPort)
-                                LogBus.info("账户「${a.name}」FTP 监听 ${server.boundPort}（休眠，认证后激活）")
+                                LogBus.info("挂载点「${a.name}」FTP 监听 ${server.boundPort}（休眠，认证后激活）")
                             }
                         }
                     }

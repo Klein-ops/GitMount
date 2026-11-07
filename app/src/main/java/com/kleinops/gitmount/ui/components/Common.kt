@@ -1,5 +1,9 @@
 package com.kleinops.gitmount.ui.components
 
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -25,13 +29,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.kleinops.gitmount.data.LogEntry
 
-/** 状态指示点 + 文案 */
+/** 状态指示点 + 文案（颜色平滑过渡） */
 @Composable
 fun StatusDot(
     running: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val color = if (running) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+    val color by animateColorAsState(
+        targetValue = if (running) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+        animationSpec = tween(200, easing = FastOutSlowInEasing),
+        label = "statusDot",
+    )
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically,
@@ -189,7 +197,11 @@ fun SectionCard(
     content: @Composable () -> Unit,
 ) {
     Card(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .animateContentSize(
+                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+            ),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     ) {

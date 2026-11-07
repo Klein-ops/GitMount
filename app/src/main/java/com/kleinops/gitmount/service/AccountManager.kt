@@ -53,10 +53,10 @@ object AccountManager {
                 repo.visibleList("/") // 连通性探测：确保仓库真实可读
                 entry.repo = repo
                 entry.touch()
-                LogBus.info("账户 ${account.name} 已激活（${account.owner}/${account.repoName}）")
+                LogBus.info("挂载点 ${account.name} 已激活（${account.owner}/${account.repoName}）")
                 return repo
             } catch (e: Exception) {
-                LogBus.error("账户 ${account.name} 激活失败：${e.message}")
+                LogBus.error("挂载点 ${account.name} 激活失败：${e.message}")
                 throw e
             } finally {
                 entry.activeOps--
@@ -100,11 +100,11 @@ object AccountManager {
         if (entry.activeOps == 0) {
             entry.repo?.forceRelease()
             entry.repo = null
-            LogBus.info("账户 $accountId 已释放缓存（回到沉睡）")
+            LogBus.info("挂载点 $accountId 已释放缓存（回到沉睡）")
         } else {
             // 有活跃操作：先放开引用，等操作结束由空闲回收兜底
             entry.repo?.let { r -> Thread { runCatching { r.forceRelease() } }.start() }
-            LogBus.info("账户 $accountId 有活跃操作，延迟释放缓存")
+            LogBus.info("挂载点 $accountId 有活跃操作，延迟释放缓存")
         }
     }
 
@@ -116,7 +116,7 @@ object AccountManager {
                 entries.remove(id)
                 entry.repo?.forceRelease()
                 entry.repo = null
-                LogBus.info("账户 $id 空闲超时，已回收仓库缓存")
+                LogBus.info("挂载点 $id 空闲超时，已回收仓库缓存")
             }
         }
     }

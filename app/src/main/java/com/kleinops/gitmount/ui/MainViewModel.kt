@@ -331,8 +331,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         /** 落盘完成后回调（调用方据此再触发重启/返回，避免读到旧配置） */
         onSaved: () -> Unit = {},
     ) {
-        if (username.isBlank() || password.isBlank()) {
-            LogBus.warn("访问账号或密码为空，服务启动后无法登录")
+        if (username.isBlank() != password.isBlank()) {
+            LogBus.warn("访问账号不完整：用户名与密码需同时填写，或同时留空使用匿名登录")
         }
         viewModelScope.launch {
             settingsRepo.saveServiceConfig(
@@ -386,7 +386,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 account.copy(id = account.id.ifBlank { "acc_" + java.util.UUID.randomUUID().toString().take(8) }),
                 activate = false,
             )
-            LogBus.info("已新建账户「${account.name}」")
+            LogBus.info("已新建挂载点「${account.name}」")
             onSaved()
         }
     }
@@ -398,7 +398,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             accounts.find { it.id == accountId }?.let { acc ->
                 settingsRepo.saveAccount(acc.copy(enabled = enabled), activate = false)
                 LogBus.info(
-                    if (enabled) "账户「${acc.name}」已启用" else "账户「${acc.name}」已停用（重启服务后不再监听其端口）"
+                    if (enabled) "挂载点「${acc.name}」已启用" else "挂载点「${acc.name}」已停用（重启服务后不再监听其端口）"
                 )
                 onSaved()
             }
@@ -412,7 +412,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val accounts = settings.value.accounts
             accounts.find { it.id == id }?.let { acc ->
                 settingsRepo.saveAccount(acc.copy(name = n), activate = false)
-                LogBus.info("账户已重命名为「$n」")
+                LogBus.info("挂载点已重命名为「$n」")
             }
         }
     }
@@ -428,7 +428,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     ) {
         viewModelScope.launch {
             settingsRepo.saveAccount(account, activate = false)
-            LogBus.info("账户「${account.name}」配置已保存")
+            LogBus.info("挂载点「${account.name}」配置已保存")
             onSaved()
         }
     }
@@ -446,7 +446,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteAccount(id: String) {
         viewModelScope.launch {
             settingsRepo.deleteAccount(id)
-            LogBus.info("已删除账户")
+            LogBus.info("已删除挂载点")
         }
     }
 

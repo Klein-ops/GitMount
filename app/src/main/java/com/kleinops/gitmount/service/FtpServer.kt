@@ -296,11 +296,14 @@ class FtpServer(
 
         private fun doLogin(pass: String) {
             val (user, password) = credentials()
-            if (user.isBlank() || password.isBlank()) {
-                reply(530, "服务端未配置账号密码，请在 App 内设置")
+            // 用户名与密码都留空 = 匿名模式：接受任意 USER/PASS（RFC 959 匿名惯例）。
+            // 只有其中一项留空属于半配置状态，无法判断意图，明确拒绝并提示。
+            val anonymous = user.isBlank() && password.isBlank()
+            if (!anonymous && (user.isBlank() || password.isBlank())) {
+                reply(530, "账号密码不完整：用户名与密码需同时填写，或同时留空使用匿名登录")
                 return
             }
-            if (pendingUser == user && pass == password) {
+            if (anonymous || (pendingUser == user && pass == password)) {
                 authenticated = true
                 // 认证通过：立即激活该账户（建 repo + 连通性探测）。
                 // 失败时提示账户不可用，但保持已认证（仓库操作时再报），

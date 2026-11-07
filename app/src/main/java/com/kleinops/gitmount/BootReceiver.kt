@@ -45,7 +45,7 @@ class BootReceiver : BroadcastReceiver() {
                 }
                 // 全局启动：一次拉起全部已启用账户的服务（mode/port 由各账户配置决定）
                 MountService.start(context.applicationContext)
-                LogBus.info("开机自启动：已请求启动全部已启用账户的服务")
+                LogBus.info("开机自启动：已请求启动全部已启用挂载点的服务")
             } catch (e: Exception) {
                 LogBus.error("开机自启动失败：${e.message}")
             } finally {

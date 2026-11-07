@@ -5,6 +5,13 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -94,20 +101,39 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
     var showSettings by remember { mutableStateOf(false) }
     var showAccountList by remember { mutableStateOf(false) }
 
-    // 账户管理页（多账户：新建一步到位 / 编辑完整配置 / 启用开关 / 删除）
-    if (showAccountList) {
-        // 系统返回键：回到主界面而不是退出应用
-        BackHandler { showAccountList = false }
-        AccountListScreen(vm = vm, onBack = { showAccountList = false })
-        return
-    }
-
-    // 设置页独立成页面（网络与后台类选项），返回后回到主界面
-    if (showSettings) {
-        BackHandler { showSettings = false }
-        SettingsScreen(vm = vm, onBack = { showSettings = false })
-        return
-    }
+    // 页面导航（主界面 / 挂载点页 / 设置页），用 AnimatedContent 做切换动效：
+    // 进入二级页从右滑入，返回时从左侧退回，整体淡入淡出
+    AnimatedContent(
+        targetState = when {
+            showAccountList -> 1
+            showSettings -> 2
+            else -> 0
+        },
+        transitionSpec = {
+            if (targetState > initialState) {
+                (slideInHorizontally(tween(300)) { it } + fadeIn(tween(300)))
+                    .togetherWith(slideOutHorizontally(tween(300)) { -it / 3 } + fadeOut(tween(300)))
+            } else {
+                (slideInHorizontally(tween(300)) { -it / 3 } + fadeIn(tween(300)))
+                    .togetherWith(slideOutHorizontally(tween(300)) { it } + fadeOut(tween(300)))
+            }
+        },
+        label = "mainNav",
+    ) { page ->
+        when (page) {
+            // 挂载点管理页（多账户：新建一步到位 / 编辑完整配置 / 启用开关 / 删除）
+            1 -> {
+                // 系统返回键：回到主界面而不是退出应用
+                BackHandler { showAccountList = false }
+                AccountListScreen(vm = vm, onBack = { showAccountList = false })
+            }
+            // 设置页独立成页面（网络与后台类选项），返回后回到主界面
+            2 -> {
+                BackHandler { showSettings = false }
+                SettingsScreen(vm = vm, onBack = { showSettings = false })
+            }
+            // ---- 主界面 ----
+            else -> {
 
     // 已配置仓库时，自动查询一次 GitHub API 本小时剩余调用余额（换令牌后也重查）
     LaunchedEffect(settings.owner, settings.repoName, settings.branch, settings.token) {
@@ -218,9 +244,9 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                     } else {
                         Text(
                             if (settings.isConfigured) {
-                                "服务未启动。点击下方按钮启动服务，将一次为全部已启用账户提供访问。"
+                                "服务未启动。点击下方按钮启动服务，将一次为全部已启用挂载点提供访问。"
                             } else {
-                                "尚未配置账户。请先点击下方「账户」按钮创建账户并绑定 GitHub 仓库。"
+                                "尚未配置挂载点。请先点击下方「挂载点」按钮创建挂载点并绑定 GitHub 仓库。"
                             },
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -245,7 +271,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                             Button(
                                 onClick = {
                                     if (!settings.isConfigured) {
-                                        scope.launch { snackbar.showSnackbar("请先在「账户」页创建账户并绑定仓库") }
+                                        scope.launch { snackbar.showSnackbar("请先在「挂载点」页创建挂载点并绑定仓库") }
                                         showAccountList = true
                                     } else {
                                         MountService.start(context)
@@ -280,7 +306,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                         ) {
                             Icon(Icons.Filled.Person, contentDescription = null, modifier = Modifier.width(18.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("账户", maxLines = 1)
+                            Text("挂载点", maxLines = 1)
                         }
                     }
                 }
@@ -360,6 +386,9 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
             }
 
             item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+            }
         }
     }
 }

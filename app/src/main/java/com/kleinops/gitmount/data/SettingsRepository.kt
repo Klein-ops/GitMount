@@ -180,7 +180,7 @@ class SettingsRepository(private val context: Context) {
                 val o = arr.getJSONObject(i)
                 AccountConfig(
                     id = o.optString("id", "").ifBlank { return@mapNotNull null },
-                    name = o.optString("name", "账户"),
+                    name = o.optString("name", "挂载点"),
                     token = TokenCrypto.decrypt(o.optString("token", "")),
                     owner = o.optString("owner", ""),
                     repoName = o.optString("repoName", ""),
@@ -206,7 +206,7 @@ class SettingsRepository(private val context: Context) {
         val repo = p[Keys.REPO] ?: return null
         return AccountConfig(
             id = "default",
-            name = "默认账户",
+            name = "默认挂载点",
             token = tk,
             owner = owner,
             repoName = repo,
@@ -251,7 +251,7 @@ class SettingsRepository(private val context: Context) {
                 listOf(
                     AccountConfig(
                         id = "default",
-                        name = "默认账户",
+                        name = "默认挂载点",
                         token = "",
                         owner = owner,
                         repoName = repo,

@@ -20,7 +20,7 @@ import java.util.UUID
  * - MOVE / COPY（读-写-删）
  * - LOCK / UNLOCK（乐观响应，保证 Windows 资源管理器等客户端可用）
  *
- * 认证：HTTP Basic（用户名/密码在账户配置里，空密码一律拒绝）。
+ * 认证：HTTP Basic（用户名/密码在账户配置里；两者都留空 = 匿名模式，放行）。
  *
  * 多账户动态激活：repo 通过 repoProvider 懒获取（AccountManager 缓存），
  * 认证前不触发 GitHub 请求；认证通过后的第一个仓库操作才激活账户。
@@ -59,10 +59,14 @@ class WebDavHandler(
         // 每次请求都重新读取凭据（用户在设置页改密码后立即生效）
         val currentUser = authUser().first
         val currentPass = authUser().second
-        if (currentUser.isBlank() || currentPass.isBlank()) {
+        // 用户名与密码都留空 = 匿名模式：放行（RFC 7235 可省略 Authorization 头）。
+        // 只有其中一项留空属于半配置状态，无法判断意图，明确拒绝。
+        val anonymous = currentUser.isBlank() && currentPass.isBlank()
+        if (!anonymous && (currentUser.isBlank() || currentPass.isBlank())) {
             exchange.respond(401, extra = mapOf("WWW-Authenticate" to "Basic realm=\"GitMount\""))
             return false
         }
+        if (anonymous) return true
         val auth = exchange.header("authorization") ?: ""
         val expected = "Basic " + Base64.encodeToString(
             "$currentUser:$currentPass".toByteArray(), Base64.NO_WRAP

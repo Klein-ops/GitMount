@@ -97,7 +97,7 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
     fun onToggle(acc: AccountConfig, enabled: Boolean) {
         vm.setAccountEnabled(acc.id, enabled) {
             if (server.running && !server.starting) {
-                LogBus.info("账户开关已变更，重启服务使其生效")
+                LogBus.info("挂载点开关已变更，重启服务使其生效")
                 MountService.restart(context)
             }
         }
@@ -106,7 +106,7 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("账户") },
+                title = { Text("挂载点") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
@@ -114,7 +114,7 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
                 },
                 actions = {
                     IconButton(onClick = { creating = true }) {
-                        Icon(Icons.Filled.Add, contentDescription = "新建账户")
+                        Icon(Icons.Filled.Add, contentDescription = "新建挂载点")
                     }
                 },
             )
@@ -133,7 +133,7 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
             // ---- 共享 GitHub 令牌 ----
             SectionCard(title = "共享 GitHub 令牌") {
                 Text(
-                    "所有账户默认共用同一个令牌；账户令牌留空即自动继承。",
+                    "所有挂载点默认共用同一个令牌；挂载点令牌留空即自动继承。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -143,7 +143,7 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
                     onValueChange = { sharedToken = it },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    label = { Text("GitHub 访问令牌（全部账户共用）") },
+                    label = { Text("GitHub 访问令牌（全部挂载点共用）") },
                     placeholder = { Text("ghp_… 或 github_pat_…") },
                     visualTransformation = if (showSharedToken) VisualTransformation.None else PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
@@ -169,10 +169,10 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
             }
 
             // ---- 账户列表 ----
-            SectionCard(title = "账户列表") {
+            SectionCard(title = "挂载点列表") {
                 if (accounts.isEmpty()) {
                     Text(
-                        "还没有账户。点右上角 + 新建。",
+                        "还没有挂载点。点右上角 + 新建。",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -197,13 +197,13 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
             ) {
                 Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.width(18.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("新建账户")
+                Text("新建挂载点")
             }
 
             Spacer(Modifier.height(4.dp))
             Text(
-                "说明：服务启动是全局操作（主界面「启动服务」），一次为所有已启用账户监听端口。" +
-                    "点账户行进入完整配置页（仓库 / 协议 / 端口 / 账号 / 令牌）。",
+                "说明：服务启动是全局操作（主界面「启动服务」），一次为所有已启用挂载点监听端口。" +
+                    "点挂载点行进入完整配置页（仓库 / 协议 / 端口 / 账号 / 令牌）。",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -215,8 +215,8 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
     deleteTarget?.let { acc ->
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
-            title = { Text("删除账户？") },
-            text = { Text("将删除账户「${acc.name}」及其仓库绑定、端口与访问账号配置。此操作不可撤销。") },
+            title = { Text("删除挂载点？") },
+            text = { Text("将删除挂载点「${acc.name}」及其仓库绑定、端口与访问账号配置。此操作不可撤销。") },
             confirmButton = {
                 Button(onClick = { vm.deleteAccount(acc.id); deleteTarget = null }) { Text("删除") }
             },

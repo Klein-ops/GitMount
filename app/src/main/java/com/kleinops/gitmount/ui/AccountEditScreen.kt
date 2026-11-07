@@ -1,5 +1,13 @@
 package com.kleinops.gitmount.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -112,7 +120,7 @@ fun AccountEditScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (isNew) "新建账户" else "编辑账户") },
+                title = { Text(if (isNew) "新建挂载点" else "编辑挂载点") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
@@ -138,7 +146,7 @@ fun AccountEditScreen(
                     onValueChange = { name = it },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    label = { Text("账户名称") },
+                    label = { Text("挂载点名称") },
                 )
                 Spacer(Modifier.height(10.dp))
                 Row(
@@ -147,7 +155,7 @@ fun AccountEditScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("启用该账户", style = MaterialTheme.typography.bodyMedium)
+                        Text("启用该挂载点", style = MaterialTheme.typography.bodyMedium)
                         Text(
                             "停用后服务跳过它、不监听其端口",
                             style = MaterialTheme.typography.labelSmall,
@@ -177,8 +185,8 @@ fun AccountEditScreen(
                     supportingText = {
                         Text(
                             if (token.isBlank() && shared.isNotBlank()) "当前使用共享令牌（已配置）"
-                            else if (token.isBlank()) "未配置令牌，服务无法为该账户启动"
-                            else "使用本账户独立令牌",
+                            else if (token.isBlank()) "未配置令牌，服务无法为该挂载点启动"
+                            else "使用本挂载点独立令牌",
                             style = MaterialTheme.typography.labelSmall,
                         )
                     },
@@ -189,7 +197,7 @@ fun AccountEditScreen(
             SectionCard(title = "绑定仓库") {
                 if (unbind) {
                     Text(
-                        "已选择解绑：保存后该账户不再绑定任何仓库。",
+                        "已选择解绑：保存后该挂载点不再绑定任何仓库。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
@@ -262,6 +270,13 @@ fun AccountEditScreen(
                                             currentBinding,
                                             ignoreCase = true,
                                         ))
+                                    // 选中态颜色平滑过渡（MD3 动效）
+                                    val rowColor by animateColorAsState(
+                                        targetValue = if (isCurrent) MaterialTheme.colorScheme.secondaryContainer
+                                        else MaterialTheme.colorScheme.surfaceVariant,
+                                        animationSpec = tween(180, easing = FastOutSlowInEasing),
+                                        label = "repoRowColor",
+                                    )
                                     Surface(
                                         onClick = {
                                             bindingRepo = r
@@ -269,8 +284,7 @@ fun AccountEditScreen(
                                         },
                                         modifier = Modifier.fillMaxWidth(),
                                         shape = MaterialTheme.shapes.small,
-                                        color = if (isCurrent) MaterialTheme.colorScheme.secondaryContainer
-                                        else MaterialTheme.colorScheme.surfaceVariant,
+                                        color = rowColor,
                                     ) {
                                         Row(
                                             modifier = Modifier
@@ -304,8 +318,16 @@ fun AccountEditScreen(
                     else -> Unit
                 }
 
-                // 「新建仓库」面板（页面内展开）
-                if (showNewRepo) {
+                // 「新建仓库」面板（页面内展开，带展开/收起动效）
+                AnimatedVisibility(
+                    visible = showNewRepo,
+                    enter = expandVertically(
+                        animationSpec = tween(240, easing = FastOutSlowInEasing),
+                    ) + fadeIn(tween(240)),
+                    exit = shrinkVertically(
+                        animationSpec = tween(200, easing = FastOutSlowInEasing),
+                    ) + fadeOut(tween(200)),
+                ) {
                     Spacer(Modifier.height(10.dp))
                     OutlinedTextField(
                         value = newRepoName,
@@ -419,6 +441,27 @@ fun AccountEditScreen(
                         }
                     },
                 )
+                // 认证状态提示：留空 = 匿名模式；只填一项 = 半配置（登录会被拒绝）
+                val bothBlank = username.isBlank() && password.isBlank()
+                val halfFilled = username.isBlank() != password.isBlank()
+                AnimatedVisibility(
+                    visible = bothBlank || halfFilled,
+                    enter = expandVertically(tween(200, easing = FastOutSlowInEasing)) + fadeIn(tween(200)),
+                    exit = shrinkVertically(tween(160, easing = FastOutSlowInEasing)) + fadeOut(tween(160)),
+                ) {
+                    Column {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            when {
+                                bothBlank -> "已启用匿名模式：无需用户名密码即可访问（仅建议在可信局域网使用）"
+                                else -> "用户名与密码需同时填写，或同时留空使用匿名模式"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (halfFilled) MaterialTheme.colorScheme.tertiary
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
             }
 
             Spacer(Modifier.height(4.dp))
@@ -439,13 +482,13 @@ fun AccountEditScreen(
                         mode = mode.name,
                         ftpPort = ftpPort.toIntOrNull() ?: (account?.ftpPort ?: 2121),
                         webdavPort = webdavPort.toIntOrNull() ?: (account?.webdavPort ?: 8080),
-                        username = username.trim().ifBlank { "gitmount" },
+                        username = username.trim(),
                         password = password,
                         enabled = enabled,
                     )
                     if (isNew) {
                         vm.createAccount(base) {
-                            LogBus.info("账户「$n」已创建")
+                            LogBus.info("挂载点「$n」已创建")
                             onSaved()
                         }
                     } else {
@@ -460,7 +503,7 @@ fun AccountEditScreen(
                             account.branch != base.branch
                         vm.updateAccount(base) {
                             if (server.running && !server.starting && serviceChanged) {
-                                LogBus.info("账户配置已变更，重启服务使新设置生效")
+                                LogBus.info("挂载点配置已变更，重启服务使新设置生效")
                                 MountService.restart(context)
                             }
                             onSaved()
@@ -468,7 +511,7 @@ fun AccountEditScreen(
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text(if (isNew) "创建账户" else "保存") }
+            ) { Text(if (isNew) "创建挂载点" else "保存") }
 
             Spacer(Modifier.height(24.dp))
         }
