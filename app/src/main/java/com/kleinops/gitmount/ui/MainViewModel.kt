@@ -139,17 +139,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 查询仓库容量信息（size 包含提交历史；私有仓库配额 500MB，公开仓库无配额） */
-    fun loadRepoInfo() {
-        val s = settings.value
-        if (s.token.isBlank() || s.owner.isBlank() || s.repoName.isBlank()) {
+    /**
+     * 查询仓库容量信息（size 包含提交历史；私有仓库配额 500MB，公开仓库无配额）。
+     * 显式参数版：多挂载点架构下由挂载点编辑页传入当前挂载点的生效令牌与仓库；
+     * 无参调用保持旧行为（查当前激活/首个账户绑定仓库）。
+     */
+    fun loadRepoInfo(
+        token: String = settings.value.token,
+        owner: String = settings.value.owner,
+        repo: String = settings.value.repoName,
+    ) {
+        val t = token.trim()
+        val o = owner.trim()
+        val r = repo.trim()
+        if (t.isBlank() || o.isBlank() || r.isBlank()) {
             _repoOpState.value = RepoOpState.Error("尚未配置仓库")
             return
         }
         _repoOpState.value = RepoOpState.Loading
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val info = GitHubClient(s.token).getRepoInfo(s.owner, s.repoName)
+                val info = GitHubClient(t).getRepoInfo(o, r)
                     ?: throw IOException("仓库不存在或无权访问")
                 _repoOpState.value = RepoOpState.Success(info)
             } catch (e: Exception) {
@@ -183,20 +193,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * 清空提交历史（孤儿提交重写：文件全部保留，历史从 N 个 commit 变成 1 个）。
      * 容量数字由 GitHub 后台 GC 延迟回收，不会立即下降。
+     * 显式参数版：多挂载点架构下由挂载点编辑页传入当前挂载点的生效令牌与仓库；
+     * 无参调用保持旧行为（对当前激活/首个账户绑定仓库操作）。
      */
-    fun clearRepoHistory() {
-        val s = settings.value
-        if (s.token.isBlank() || s.owner.isBlank() || s.repoName.isBlank()) {
+    fun clearRepoHistory(
+        token: String = settings.value.token,
+        owner: String = settings.value.owner,
+        repo: String = settings.value.repoName,
+        branch: String = settings.value.branch,
+    ) {
+        val t = token.trim()
+        val o = owner.trim()
+        val r = repo.trim()
+        val b = branch.ifBlank { "main" }
+        if (t.isBlank() || o.isBlank() || r.isBlank()) {
             _repoOpState.value = RepoOpState.Error("尚未配置仓库")
             return
         }
         _repoOpState.value = RepoOpState.ClearingHistory
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val repo = GitRepository(GitHubClient(s.token), s.owner, s.repoName, s.branch)
+                val repo = GitRepository(GitHubClient(t), o, r, b)
                 repo.clearHistory()
                 // 清完历史立即重新拉取容量（此时 size 可能仍含旧的不可达对象，如实展示）
-                val info = GitHubClient(s.token).getRepoInfo(s.owner, s.repoName)
+                val info = GitHubClient(t).getRepoInfo(o, r)
                 _repoOpState.value = if (info != null) RepoOpState.Success(info) else RepoOpState.Error("历史已清空，但容量信息暂时不可用")
             } catch (e: Exception) {
                 _repoOpState.value = RepoOpState.Error(friendly(e))
