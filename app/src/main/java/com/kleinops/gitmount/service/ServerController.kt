@@ -30,9 +30,16 @@ object LogBus {
 
     fun add(level: String, msg: String) {
         val time = timeFormat.get()?.format(Date()) ?: "--:--:--"
-        val entry = LogEntry(time, level, msg)
-        // 用 update 做原子读-改-写；直接赋值在并发下会丢失其他线程刚写入的条目
-        _logs.update { current -> (listOf(entry) + current).take(MAX) }
+        // 相邻重复合并：与最新一条 level+message 完全相同则计数 +1 并刷新时间，
+        // 避免高频重复日志（如网络能力回调）刷屏占满最近 300 条。
+        _logs.update { current ->
+            val head = current.firstOrNull()
+            if (head != null && head.level == level && head.message == msg) {
+                listOf(head.copy(count = head.count + 1, time = time)) + current.drop(1)
+            } else {
+                (listOf(LogEntry(time, level, msg)) + current).take(MAX)
+            }
+        }
         // 同步落盘（异步写），供用户直接读取日志文件排查问题
         FileLogger.append(level, msg)
     }

@@ -84,4 +84,6 @@ data class LogEntry(
     val time: String,
     val level: String, // INFO / WARN / ERROR
     val message: String,
+    /** 相邻重复合并计数：同一 level+message 连续出现时累加，UI 显示 ×N，避免刷屏 */
+    val count: Int = 1,
 )

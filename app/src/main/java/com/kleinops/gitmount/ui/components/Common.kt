@@ -164,7 +164,7 @@ fun LogRow(entry: LogEntry, modifier: Modifier = Modifier) {
         )
         Spacer(Modifier.width(8.dp))
         Text(
-            text = entry.message,
+            text = if (entry.count > 1) "${entry.message} ×${entry.count}" else entry.message,
             style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
             color = color,
             modifier = Modifier.weight(1f),
