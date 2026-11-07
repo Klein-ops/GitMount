@@ -210,6 +210,14 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
         }
     }
 
+    // 统一的新建仓库回调（createRepoOnly 在 IO 线程回调，这里切回主线程再更新 UI）
+    val createRepoFn: (token: String, name: String, isPrivate: Boolean, onResult: (RepoBrief?) -> Unit) -> Unit =
+        { t, n, p, cb ->
+            vm.createRepoOnly(t, n, p) { brief ->
+                scope.launch { cb(brief) }
+            }
+        }
+
     // 新建账户：一步到位对话框
     if (showCreate) {
         AccountCreateDialog(
@@ -217,6 +225,7 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
             scanState = vm.scanState.collectAsStateWithLifecycle().value,
             setupState = vm.setupState.collectAsStateWithLifecycle().value,
             onScan = { vm.scanRepos(it) },
+            onCreateRepo = createRepoFn,
             onSave = { draft ->
                 vm.createAccount(draft) {
                     scope.launch { snackbar.showSnackbar("账户「${draft.name}」已创建") }
@@ -232,18 +241,24 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
         )
     }
 
-    // 编辑账户完整配置（名称 / 协议 / 端口 / 访问账号 / 独立令牌 / 仓库令牌）
+    // 编辑账户完整配置（名称 / 令牌 / 绑定仓库 / 协议 / 端口 / 访问账号）
     editTarget?.let { acc ->
         AccountEditDialog(
             account = acc,
             sharedToken = shared.takeIf { it.isNotBlank() },
+            scanState = vm.scanState.collectAsStateWithLifecycle().value,
+            onScan = { vm.scanRepos(it) },
+            onCreateRepo = createRepoFn,
             onSave = { updated ->
                 val changedService = acc.mode != updated.mode ||
                     acc.ftpPort != updated.ftpPort ||
                     acc.webdavPort != updated.webdavPort ||
                     acc.username != updated.username ||
                     acc.password != updated.password ||
-                    acc.token != updated.token
+                    acc.token != updated.token ||
+                    acc.owner != updated.owner ||
+                    acc.repoName != updated.repoName ||
+                    acc.branch != updated.branch
                 vm.updateAccount(updated) {
                     if (server.running && !server.starting && changedService) {
                         LogBus.info("账户配置已变更，重启服务使新设置生效")
@@ -253,7 +268,10 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
                 }
                 editTarget = null
             },
-            onDismiss = { editTarget = null },
+            onDismiss = {
+                vm.clearScanState()
+                editTarget = null
+            },
         )
     }
 
@@ -335,6 +353,7 @@ private fun AccountCreateDialog(
     scanState: ScanState,
     setupState: SetupState,
     onScan: (String) -> Unit,
+    onCreateRepo: (token: String, name: String, isPrivate: Boolean, onResult: (RepoBrief?) -> Unit) -> Unit,
     onSave: (AccountConfig) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -347,6 +366,11 @@ private fun AccountCreateDialog(
     var username by remember { mutableStateOf("gitmount") }
     var password by remember { mutableStateOf("") }
     var selectedRepo by remember { mutableStateOf<RepoBrief?>(null) }
+    // 「新建仓库」弹层状态
+    var showCreateRepo by remember { mutableStateOf(false) }
+    var newRepoName by remember { mutableStateOf("") }
+    var newRepoPrivate by remember { mutableStateOf(true) }
+    var creatingRepo by remember { mutableStateOf(false) }
     val working = setupState is SetupState.Working || scanState is ScanState.Working
 
     AlertDialog(
@@ -393,17 +417,23 @@ private fun AccountCreateDialog(
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
-                TextButton(
-                    onClick = { onScan(token) },
-                    enabled = !working && token.isNotBlank(),
-                ) {
-                    if (scanState is ScanState.Working) {
-                        CircularProgressIndicator(modifier = Modifier.width(14.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(8.dp))
-                        Text("扫描中…")
-                    } else {
-                        Text("扫描我的仓库")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(
+                        onClick = { onScan(token) },
+                        enabled = !working && token.isNotBlank(),
+                    ) {
+                        if (scanState is ScanState.Working) {
+                            CircularProgressIndicator(modifier = Modifier.width(14.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("扫描中…")
+                        } else {
+                            Text("扫描我的仓库")
+                        }
                     }
+                    TextButton(
+                        onClick = { showCreateRepo = true },
+                        enabled = !working && token.isNotBlank(),
+                    ) { Text("新建仓库") }
                 }
                 when (scanState) {
                     is ScanState.Error -> Text(
@@ -532,6 +562,63 @@ private fun AccountCreateDialog(
             TextButton(onClick = onDismiss, enabled = !working) { Text("取消") }
         },
     )
+
+    // 「新建仓库」嵌套对话框：创建成功后自动选中新仓库作为绑定
+    if (showCreateRepo) {
+        AlertDialog(
+            onDismissRequest = { if (!creatingRepo) showCreateRepo = false },
+            title = { Text("新建仓库") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = newRepoName,
+                        onValueChange = { newRepoName = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("仓库名称") },
+                        placeholder = { Text("例如 my-repo") },
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Switch(
+                            checked = newRepoPrivate,
+                            onCheckedChange = { newRepoPrivate = it },
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(if (newRepoPrivate) "私有仓库" else "公开仓库")
+                    }
+                    if (creatingRepo) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.width(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("正在创建…")
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = !creatingRepo && newRepoName.trim().isNotBlank(),
+                    onClick = {
+                        creatingRepo = true
+                        onCreateRepo(token.trim(), newRepoName.trim(), newRepoPrivate) { brief ->
+                            creatingRepo = false
+                            showCreateRepo = false
+                            if (brief != null) {
+                                // 创建成功：自动选中新仓库作为绑定
+                                selectedRepo = brief
+                            }
+                        }
+                    },
+                ) { Text("创建") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { if (!creatingRepo) showCreateRepo = false },
+                    enabled = !creatingRepo,
+                ) { Text("取消") }
+            },
+        )
+    }
 }
 
 /**
@@ -543,10 +630,21 @@ private fun AccountCreateDialog(
 private fun AccountEditDialog(
     account: AccountConfig,
     sharedToken: String?,
+    scanState: ScanState,
+    onScan: (String) -> Unit,
+    onCreateRepo: (token: String, name: String, isPrivate: Boolean, onResult: (RepoBrief?) -> Unit) -> Unit,
     onSave: (AccountConfig) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var name by remember(account.id) { mutableStateOf(account.name) }
+    // 仓库重新绑定：绑定新仓库后保存时覆盖账户原绑定；unbind=true 表示保存时解绑
+    var bindingRepo by remember(account.id) { mutableStateOf<RepoBrief?>(null) }
+    var unbind by remember(account.id) { mutableStateOf(false) }
+    // 「新建仓库」弹层状态（创建成功后自动选中为新绑定）
+    var showCreateRepo by remember(account.id) { mutableStateOf(false) }
+    var newRepoName by remember(account.id) { mutableStateOf("") }
+    var newRepoPrivate by remember(account.id) { mutableStateOf(true) }
+    var creatingRepo by remember(account.id) { mutableStateOf(false) }
     var mode by remember(account.id) {
         mutableStateOf(runCatching { ServerMode.valueOf(account.mode) }.getOrDefault(ServerMode.WEBDAV))
     }
@@ -557,6 +655,8 @@ private fun AccountEditDialog(
     var token by remember(account.id) { mutableStateOf(account.token) }
     var showPassword by remember { mutableStateOf(false) }
     var showToken by remember { mutableStateOf(false) }
+    // 扫描/新建仓库使用的生效令牌：账户独立令牌为空时回退共享令牌（函数级，供末尾嵌套对话框使用）
+    val scanToken = token.trim().ifBlank { sharedToken.orEmpty() }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -576,6 +676,90 @@ private fun AccountEditDialog(
                     singleLine = true,
                     label = { Text("账户名称") },
                 )
+
+                // ---- 绑定仓库（可重新绑定 / 解绑）----
+                Text(
+                    "绑定仓库",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                val currentBinding = bindingRepo?.let { it.fullName } ?: account.repoLabel
+                if (unbind) {
+                    Text(
+                        "（解绑：保存后该账户不再绑定任何仓库）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                } else {
+                    Text(
+                        if (bindingRepo != null) "将绑定：${bindingRepo!!.fullName}（分支 ${bindingRepo!!.defaultBranch}）"
+                        else "当前：$currentBinding",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(
+                        onClick = {
+                            unbind = false
+                            if (scanToken.isBlank()) return@TextButton
+                            onScan(scanToken)
+                        },
+                        enabled = scanToken.isNotBlank(),
+                    ) {
+                        if (scanState is ScanState.Working) {
+                            CircularProgressIndicator(modifier = Modifier.width(14.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("扫描中…")
+                        } else {
+                            Text("扫描我的仓库")
+                        }
+                    }
+                    TextButton(
+                        onClick = { showCreateRepo = true },
+                        enabled = scanToken.isNotBlank() && !creatingRepo,
+                    ) { Text("新建仓库") }
+                    TextButton(
+                        onClick = { unbind = true; bindingRepo = null },
+                        enabled = !unbind && (account.owner.isNotBlank() || bindingRepo != null),
+                    ) { Text("解绑") }
+                }
+                when (scanState) {
+                    is ScanState.Error -> Text(
+                        scanState.message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    is ScanState.Success -> {
+                        if (scanState.repos.isEmpty()) {
+                            Text(
+                                "该令牌下没有可绑定的仓库",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        } else {
+                            scanState.repos.take(20).forEach { repo ->
+                                val full = repo.fullName
+                                OutlinedButton(
+                                    onClick = { bindingRepo = repo; unbind = false },
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            if (bindingRepo?.fullName == full) "✓ " else "",
+                                            color = MaterialTheme.colorScheme.primary,
+                                        )
+                                        Text(
+                                            full + if (repo.isPrivate) "（私有）" else "（公开）",
+                                            maxLines = 1,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    else -> Unit
+                }
 
                 Text(
                     "服务协议",
@@ -665,6 +849,7 @@ private fun AccountEditDialog(
         confirmButton = {
             Button(
                 onClick = {
+                    val newBinding = bindingRepo
                     onSave(
                         account.copy(
                             name = name.trim().ifBlank { account.name },
@@ -674,6 +859,10 @@ private fun AccountEditDialog(
                             username = username.trim().ifBlank { "gitmount" },
                             password = password,
                             token = token.trim(),
+                            // 仓库绑定：重选则覆盖；解绑则清空
+                            owner = newBinding?.fullName?.substringBefore('/') ?: if (unbind) "" else account.owner,
+                            repoName = newBinding?.fullName?.substringAfter('/') ?: if (unbind) "" else account.repoName,
+                            branch = newBinding?.defaultBranch ?: if (unbind) "main" else account.branch,
                         )
                     )
                 },
@@ -683,4 +872,62 @@ private fun AccountEditDialog(
             TextButton(onClick = onDismiss) { Text("取消") }
         },
     )
+
+    // 「新建仓库」嵌套对话框：创建成功后自动选中为新绑定
+    if (showCreateRepo) {
+        AlertDialog(
+            onDismissRequest = { if (!creatingRepo) showCreateRepo = false },
+            title = { Text("新建仓库") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = newRepoName,
+                        onValueChange = { newRepoName = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("仓库名称") },
+                        placeholder = { Text("例如 my-repo") },
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Switch(
+                            checked = newRepoPrivate,
+                            onCheckedChange = { newRepoPrivate = it },
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(if (newRepoPrivate) "私有仓库" else "公开仓库")
+                    }
+                    if (creatingRepo) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.width(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("正在创建…")
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = !creatingRepo && newRepoName.trim().isNotBlank(),
+                    onClick = {
+                        creatingRepo = true
+                        onCreateRepo(scanToken, newRepoName.trim(), newRepoPrivate) { brief ->
+                            creatingRepo = false
+                            showCreateRepo = false
+                            if (brief != null) {
+                                // 创建成功：自动选中新仓库作为绑定，并取消解绑
+                                unbind = false
+                                bindingRepo = brief
+                            }
+                        }
+                    },
+                ) { Text("创建") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { if (!creatingRepo) showCreateRepo = false },
+                    enabled = !creatingRepo,
+                ) { Text("取消") }
+            },
+        )
+    }
 }
