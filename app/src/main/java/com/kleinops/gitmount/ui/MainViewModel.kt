@@ -205,10 +205,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 绑定已有仓库（仓库必须已存在，走一套统一的保存逻辑）。
+     * 绑定已有仓库到指定账户（仓库必须已存在，走一套统一的保存逻辑）。
      * @param token 用户输入的令牌（尚未保存时也能直接用）
+     * @param targetAccountId 目标账户 id；null = 旧行为（激活账户/默认账户）
      */
-    fun bindRepo(token: String, owner: String, repoName: String, branch: String = "") {
+    fun bindRepo(token: String, owner: String, repoName: String, branch: String = "", targetAccountId: String? = null) {
         val t = token.trim()
         val o = owner.trim()
         val r = repoName.trim()
@@ -228,7 +229,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     val b = GitHubClient(t).getDefaultBranch(o, r)
                     b ?: throw GitHubApiException(404, "仓库 $o/$r 不存在或无权访问")
                 }
-                settingsRepo.saveRepo(t, o, r, actualBranch)
+                settingsRepo.saveRepo(t, o, r, actualBranch, targetAccountId)
                 LogBus.info("已绑定仓库 $o/$r（$actualBranch）")
                 _setupState.value = SetupState.Success("已绑定：$o/$r（$actualBranch）")
             } catch (e: Exception) {
@@ -240,11 +241,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 新建仓库并立即绑定（创建完成后走与绑定完全相同的保存逻辑）。
+     * 新建仓库并立即绑定到指定账户（创建完成后走与绑定完全相同的保存逻辑）。
      * @param token 用户输入的令牌（尚未保存时也能直接用）
      * @param isPrivate true = 私有，false = 公开
+     * @param targetAccountId 目标账户 id；null = 旧行为（激活账户/默认账户）
      */
-    fun createAndBindRepo(token: String, name: String, isPrivate: Boolean) {
+    fun createAndBindRepo(token: String, name: String, isPrivate: Boolean, targetAccountId: String? = null) {
         val t = token.trim()
         val repoName = name.trim()
         if (t.isBlank()) {
@@ -266,7 +268,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 LogBus.info("仓库创建成功，读取默认分支…")
                 // 新建仓库后 GitHub 可能短暂 404（auto_init 尚未完成），重试几次
                 val resolvedBranch = awaitDefaultBranch(client, login, repoName) ?: "main"
-                settingsRepo.saveRepo(t, login, repoName, resolvedBranch)
+                settingsRepo.saveRepo(t, login, repoName, resolvedBranch, targetAccountId)
                 // 创建后立刻刷新列表，让新仓库出现在仓库列表里
                 runCatching { client.listUserRepos() }.getOrNull()?.let { repos ->
                     scanCache = ScanCache(t, login, repos, System.currentTimeMillis())
@@ -279,6 +281,42 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val msg = friendly(e)
                 LogBus.error("创建仓库失败：$msg")
                 _setupState.value = SetupState.Error(msg)
+            }
+        }
+    }
+
+    /**
+     * 仅创建仓库并刷新扫描列表（不绑定账户）。
+     * 用于账户创建对话框内的"新建仓库"：创建成功后刷新列表并自动选中新仓库，
+     * 随后随账户一起落盘，实现"创建账户一步到位"。
+     */
+    fun createRepoOnly(token: String, name: String, isPrivate: Boolean, onResult: (RepoBrief?) -> Unit = {}) {
+        val t = token.trim()
+        val repoName = name.trim()
+        if (t.isBlank() || repoName.isBlank()) {
+            onResult(null)
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val client = GitHubClient(t)
+                val login = client.getUser()
+                if (login.isBlank()) throw IllegalStateException("令牌无效")
+                LogBus.info("正在创建${if (isPrivate) "私有" else "公开"}仓库 $login/$repoName …")
+                client.createRepo(repoName, isPrivate)
+                awaitDefaultBranch(client, login, repoName)
+                // 绕过缓存强制刷新扫描列表，让新仓库立即可选
+                scanCache = null
+                val repos = client.listUserRepos()
+                scanCache = ScanCache(t, login, repos, System.currentTimeMillis())
+                _scanState.value = ScanState.Success(login, repos)
+                LogBus.info("仓库 $login/$repoName 创建成功，已刷新列表")
+                onResult(repos.find { it.fullName == "$login/$repoName" })
+            } catch (e: Exception) {
+                val msg = friendly(e)
+                LogBus.error("创建仓库失败：$msg")
+                _scanState.value = ScanState.Error(msg)
+                onResult(null)
             }
         }
     }
@@ -335,22 +373,35 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- 多账户管理 ----------
 
-    /** 新建账户（空账户，未绑定仓库；随后可在「仓库」中绑定）并设为激活 */
-    fun createAccount(name: String) {
-        val n = name.trim().ifBlank { "新账户" }
-        val id = "acc_" + java.util.UUID.randomUUID().toString().take(8)
+    /**
+     * 新建账户（一步到位：完整配置一次落盘，无需再切到其他页挨个设置）。
+     * 账户名 / 独立令牌（留空继承共享）/ 仓库绑定 / 协议 / 端口 / 访问账号一次填完。
+     */
+    fun createAccount(
+        account: com.kleinops.gitmount.data.AccountConfig,
+        onSaved: () -> Unit = {},
+    ) {
         viewModelScope.launch {
             settingsRepo.saveAccount(
-                com.kleinops.gitmount.data.AccountConfig(
-                    id = id,
-                    name = n,
-                    token = "",
-                    owner = "",
-                    repoName = "",
-                ),
-                activate = true,
+                account.copy(id = account.id.ifBlank { "acc_" + java.util.UUID.randomUUID().toString().take(8) }),
+                activate = false,
             )
-            LogBus.info("已新建账户「$n」")
+            LogBus.info("已新建账户「${account.name}」")
+            onSaved()
+        }
+    }
+
+    /** 切换账户启用开关（账户页 Switch）——停用后服务重启即跳过该账户 */
+    fun setAccountEnabled(accountId: String, enabled: Boolean, onSaved: () -> Unit = {}) {
+        viewModelScope.launch {
+            val accounts = settings.value.accounts
+            accounts.find { it.id == accountId }?.let { acc ->
+                settingsRepo.saveAccount(acc.copy(enabled = enabled), activate = false)
+                LogBus.info(
+                    if (enabled) "账户「${acc.name}」已启用" else "账户「${acc.name}」已停用（重启服务后不再监听其端口）"
+                )
+                onSaved()
+            }
         }
     }
 
@@ -396,13 +447,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             settingsRepo.deleteAccount(id)
             LogBus.info("已删除账户")
-        }
-    }
-
-    /** 切换激活账户（UI 以激活账户视角编辑配置/绑定仓库；服务端始终监听全部账户） */
-    fun switchAccount(id: String) {
-        viewModelScope.launch {
-            settingsRepo.setActiveAccount(id)
         }
     }
 

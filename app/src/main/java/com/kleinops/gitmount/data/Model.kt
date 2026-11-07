@@ -31,6 +31,12 @@ data class AccountConfig(
     val webdavPort: Int = 8080,
     val username: String = "gitmount",
     val password: String = "",
+    /**
+     * 账户启用开关（账户页 Switch 控制）：
+     * false = 该账户被停用，服务启动时跳过它、不监听其端口。
+     * 服务启停是全局操作（主界面「启动/停止服务」），账户是否参与由这里决定。
+     */
+    val enabled: Boolean = true,
 ) {
     val isConfigured: Boolean
         get() = token.isNotBlank() && owner.isNotBlank() && repoName.isNotBlank()
@@ -48,9 +54,9 @@ data class AccountConfig(
      */
     fun effectiveToken(sharedToken: String): String = token.ifBlank { sharedToken }
 
-    /** 账户是否可提供服务：仓库已绑定且生效令牌非空 */
+    /** 账户是否可提供服务：账户已启用、仓库已绑定且生效令牌非空 */
     fun isUsable(sharedToken: String): Boolean =
-        effectiveToken(sharedToken).isNotBlank() && owner.isNotBlank() && repoName.isNotBlank()
+        enabled && effectiveToken(sharedToken).isNotBlank() && owner.isNotBlank() && repoName.isNotBlank()
 }
 
 /** 服务运行状态 */

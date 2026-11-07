@@ -53,9 +53,11 @@ data class AppSettings(
     val activeAccount: AccountConfig?
         get() = accounts.find { it.id == activeAccountId } ?: accounts.firstOrNull()
 
-    /** 当前激活账户是否可提供服务（仓库已绑定且生效令牌非空） */
+    /** 当前是否有至少一个「启用且可用」的账户（服务启动的全局判定）。
+     *  服务启停是全局操作：只要存在任意一个启用且可用的账户即可启动，
+     *  其余未配置/被停用的账户由服务启动时自动跳过。 */
     val isConfigured: Boolean
-        get() = activeAccount?.let { it.isUsable(sharedToken) } == true
+        get() = accounts.any { it.isUsable(sharedToken) }
 
     // ---------- 以下为"当前账户"的代理 getter（保持旧代码的 settings.token/owner/... 调用不变） ----------
 
@@ -188,6 +190,7 @@ class SettingsRepository(private val context: Context) {
                     webdavPort = o.optInt("webdavPort", 8080),
                     username = o.optString("username", "gitmount"),
                     password = o.optString("password", ""),
+                    enabled = !o.has("enabled") || o.optBoolean("enabled", true),
                 )
             }
         } catch (e: Exception) {
@@ -216,19 +219,31 @@ class SettingsRepository(private val context: Context) {
         )
     }
 
-    suspend fun saveRepo(token: String, owner: String, repo: String, branch: String) {
+    /**
+     * 把仓库绑定到指定账户（账户页新建/编辑时调用；不再依赖"激活账户"）。
+     * 绑定仓库时填的令牌自动成为全局共享令牌；账户独立令牌置空（继承共享）——
+     * 这样所有账户默认共用同一个 GitHub API，需要独立的账户再在账户编辑里单独填。
+     * @param targetAccountId 目标账户 id；为 null 时回退旧行为（绑定到激活账户或创建默认账户）
+     */
+    suspend fun saveRepo(
+        token: String,
+        owner: String,
+        repo: String,
+        branch: String,
+        targetAccountId: String? = null,
+    ) {
         context.dataStore.edit { p ->
-            // 多账户：更新当前激活账户的仓库绑定（保留该账户其余字段）。
-            // 尚无账户或激活账户不存在时（首次绑定），自动创建默认账户，避免绑定丢失。
+            // 多账户：更新目标账户的仓库绑定（保留该账户其余字段）。
+            // 尚无账户或目标账户不存在时（首次绑定），自动创建默认账户，避免绑定丢失。
             val current = readAccountsOrLegacy(p)
-            val activeId = p[Keys.ACTIVE_ACCOUNT_ID]
+            val targetId = targetAccountId
                 ?.takeIf { id -> current.any { it.id == id } }
+                ?: p[Keys.ACTIVE_ACCOUNT_ID]
+                    ?.takeIf { id -> current.any { it.id == id } }
                 ?: current.firstOrNull()?.id
-            // 绑定仓库时填的令牌自动成为全局共享令牌；账户独立令牌置空（继承共享）——
-            // 这样所有账户默认共用同一个 GitHub API，需要独立的账户再在账户编辑里单独填。
-            val accounts = if (activeId != null) {
+            val accounts = if (targetId != null) {
                 current.map { a ->
-                    if (a.id == activeId) {
+                    if (a.id == targetId) {
                         a.copy(token = "", owner = owner, repoName = repo, branch = branch)
                     } else a
                 }
@@ -282,6 +297,7 @@ class SettingsRepository(private val context: Context) {
                     .put("webdavPort", a.webdavPort)
                     .put("username", a.username)
                     .put("password", a.password)
+                    .put("enabled", a.enabled)
             )
         }
         return arr.toString()
@@ -316,11 +332,6 @@ class SettingsRepository(private val context: Context) {
                 p[Keys.ACTIVE_ACCOUNT_ID] = accounts.firstOrNull()?.id ?: ""
             }
         }
-    }
-
-    /** 切换激活账户 */
-    suspend fun setActiveAccount(id: String) {
-        context.dataStore.edit { p -> p[Keys.ACTIVE_ACCOUNT_ID] = id }
     }
 
     /**

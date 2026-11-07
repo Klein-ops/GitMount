@@ -3,7 +3,6 @@ package com.kleinops.gitmount
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import com.kleinops.gitmount.data.ServerMode
 import com.kleinops.gitmount.data.SettingsRepository
 import com.kleinops.gitmount.service.LogBus
 import com.kleinops.gitmount.service.MountService
@@ -38,18 +37,15 @@ class BootReceiver : BroadcastReceiver() {
                 }.getOrNull() ?: return@Thread
                 if (!settings.autoStart) return@Thread
                 if (!settings.isConfigured) return@Thread
-                if (settings.username.isBlank() || settings.password.isBlank()) return@Thread
-
-                val mode = runCatching { ServerMode.valueOf(settings.mode) }.getOrDefault(ServerMode.WEBDAV)
-                val port = if (mode == ServerMode.FTP) settings.ftpPort else settings.webdavPort
 
                 // 开机后网络可能尚未就绪（尤其 Wi-Fi），延迟 15 秒再启动
                 try {
                     Thread.sleep(15_000)
                 } catch (_: InterruptedException) {
                 }
-                MountService.start(context.applicationContext, mode, port)
-                LogBus.info("开机自启动：已请求启动 ${mode.label} 服务（端口 $port）")
+                // 全局启动：一次拉起全部已启用账户的服务（mode/port 由各账户配置决定）
+                MountService.start(context.applicationContext)
+                LogBus.info("开机自启动：已请求启动全部已启用账户的服务")
             } catch (e: Exception) {
                 LogBus.error("开机自启动失败：${e.message}")
             } finally {

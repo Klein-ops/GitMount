@@ -233,9 +233,7 @@ class MountService : Service() {
                     }
                     val shouldResume = settings != null &&
                         settings.serviceEnabled &&
-                        settings.isConfigured &&
-                        settings.username.isNotBlank() &&
-                        settings.password.isNotBlank()
+                        settings.isConfigured
                     if (shouldResume) {
                         LogBus.info("检测到用户曾开启服务，自动按最新配置恢复")
                         // 系统重建的前台服务也先补一次 startForeground，避免恢复期间被判定非前台
@@ -315,7 +313,13 @@ class MountService : Service() {
 
                     val accounts = settings.accounts.filter { it.isUsable(settings.sharedToken) }
                     if (accounts.isEmpty()) {
-                        throw IllegalStateException("尚未配置任何账户，请先在 App 中添加账户并绑定仓库")
+                        // 区分两种空：一个账户都没有，还是有账户但全被停用/未配置
+                        val reason = if (settings.accounts.isEmpty()) {
+                            "尚未配置任何账户，请先在「账户」页新建账户并绑定仓库"
+                        } else {
+                            "没有可启动的账户：请检查账户开关是否开启、是否已绑定仓库"
+                        }
+                        throw IllegalStateException(reason)
                     }
 
                     // 启动前网络预检：无可用网络时立即失败，不发起 GitHub 请求
@@ -379,8 +383,9 @@ class MountService : Service() {
                         }
                     }
 
-                    // 状态与通知：以激活账户为主展示
-                    val main = settings.activeAccount ?: accounts.first()
+                    // 状态与通知：取第一个已启用账户作为通知的主展示（仅用于通知标题/地址，
+                    // 主界面已按全部账户分别展示各自的状态与地址）
+                    val main = accounts.first()
                     val mainMode = runCatching { ServerMode.valueOf(main.mode) }.getOrDefault(ServerMode.WEBDAV)
                     ServerController.setState(
                         ServerController.State(
