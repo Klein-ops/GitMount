@@ -177,15 +177,17 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 } else {
-                    accounts.forEach { acc ->
-                        AccountRow(
-                            account = acc,
-                            enabled = acc.enabled,
-                            activeNow = AccountManager.isActive(acc.id),
-                            onToggle = { onToggle(acc, it) },
-                            onClick = { editTarget = acc },
-                            onDelete = { deleteTarget = acc },
-                        )
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        accounts.forEach { acc ->
+                            AccountRow(
+                                account = acc,
+                                enabled = acc.enabled,
+                                activeNow = AccountManager.isActive(acc.id),
+                                onToggle = { onToggle(acc, it) },
+                                onClick = { editTarget = acc },
+                                onDelete = { deleteTarget = acc },
+                            )
+                        }
                     }
                 }
             }

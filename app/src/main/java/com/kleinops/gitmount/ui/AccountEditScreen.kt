@@ -322,27 +322,28 @@ fun AccountEditScreen(
                 AnimatedVisibility(
                     visible = showNewRepo,
                     enter = expandVertically(
+                        expandFrom = Alignment.Top,
                         animationSpec = tween(240, easing = FastOutSlowInEasing),
                     ) + fadeIn(tween(240)),
                     exit = shrinkVertically(
+                        shrinkTowards = Alignment.Top,
                         animationSpec = tween(200, easing = FastOutSlowInEasing),
                     ) + fadeOut(tween(200)),
                 ) {
-                    Spacer(Modifier.height(10.dp))
-                    OutlinedTextField(
-                        value = newRepoName,
-                        onValueChange = { newRepoName = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("新仓库名称") },
-                        placeholder = { Text("例如 my-repo") },
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        OutlinedTextField(
+                            value = newRepoName,
+                            onValueChange = { newRepoName = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            label = { Text("新仓库名称") },
+                            placeholder = { Text("例如 my-repo") },
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(if (newRepoPrivate) "私有仓库" else "公开仓库", style = MaterialTheme.typography.bodyMedium)
                             Text(
@@ -354,7 +355,6 @@ fun AccountEditScreen(
                         Spacer(Modifier.width(8.dp))
                         Switch(checked = newRepoPrivate, onCheckedChange = { newRepoPrivate = it })
                     }
-                    Spacer(Modifier.height(6.dp))
                     Button(
                         enabled = !creatingRepo && newRepoName.trim().isNotBlank(),
                         onClick = {
@@ -379,6 +379,7 @@ fun AccountEditScreen(
                         } else {
                             Text("创建并绑定")
                         }
+                    }
                     }
                 }
             }

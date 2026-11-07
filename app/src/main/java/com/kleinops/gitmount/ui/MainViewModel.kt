@@ -454,6 +454,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _scanState.value = ScanState.Idle
     }
 
+    /**
+     * 释放可重建的 UI 内存（应用进入后台 / 系统内存吃紧时调用）。
+     * 只清掉一次性展示状态与扫描缓存，不动设置、令牌、服务状态——
+     * 这些由 DataStore / 服务 / 文件日志持久化，回到前台会自动重新加载。
+     */
+    fun releaseUiMemory() {
+        scanCache = null
+        _setupState.value = SetupState.Idle
+        _scanState.value = ScanState.Idle
+        _repoOpState.value = RepoOpState.Idle
+        _rateLimitState.value = RateLimitState.Idle
+        LogBus.info("已释放后台 UI 缓存（扫描/余额/瞬时状态）")
+    }
+
     fun clearLogs() = LogBus.clear()
 
     /**
