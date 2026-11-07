@@ -61,6 +61,9 @@ fun ServiceConfigScreen(vm: MainViewModel, onBack: () -> Unit) {
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
+    // 当前编辑的账户名（多账户下让用户清楚在配置哪个账户）
+    val accountName = settings.activeAccount?.name ?: "服务"
+
     // 用 settings 的具体字段作为 remember key：settings 从默认值加载为真实值时会重置一次，
     // 之后用户在本页的编辑不会被 DataStore 的再次发射覆盖。
     var mode by remember(settings.mode) {
@@ -76,7 +79,7 @@ fun ServiceConfigScreen(vm: MainViewModel, onBack: () -> Unit) {
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
-                title = { Text("服务配置") },
+                title = { Text("服务配置 · $accountName") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")

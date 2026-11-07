@@ -333,6 +333,54 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _setupState.value = SetupState.Idle
     }
 
+    // ---------- 多账户管理 ----------
+
+    /** 新建账户（空账户，未绑定仓库；随后可在「仓库」中绑定）并设为激活 */
+    fun createAccount(name: String) {
+        val n = name.trim().ifBlank { "新账户" }
+        val id = "acc_" + java.util.UUID.randomUUID().toString().take(8)
+        viewModelScope.launch {
+            settingsRepo.saveAccount(
+                com.kleinops.gitmount.data.AccountConfig(
+                    id = id,
+                    name = n,
+                    token = "",
+                    owner = "",
+                    repoName = "",
+                ),
+                activate = true,
+            )
+            LogBus.info("已新建账户「$n」")
+        }
+    }
+
+    /** 重命名账户 */
+    fun renameAccount(id: String, name: String) {
+        val n = name.trim().ifBlank { return }
+        viewModelScope.launch {
+            val accounts = settings.value.accounts
+            accounts.find { it.id == id }?.let { acc ->
+                settingsRepo.saveAccount(acc.copy(name = n), activate = false)
+                LogBus.info("账户已重命名为「$n」")
+            }
+        }
+    }
+
+    /** 删除账户（若删的是激活账户，激活回退到剩余第一个） */
+    fun deleteAccount(id: String) {
+        viewModelScope.launch {
+            settingsRepo.deleteAccount(id)
+            LogBus.info("已删除账户")
+        }
+    }
+
+    /** 切换激活账户（UI 以激活账户视角编辑配置/绑定仓库；服务端始终监听全部账户） */
+    fun switchAccount(id: String) {
+        viewModelScope.launch {
+            settingsRepo.setActiveAccount(id)
+        }
+    }
+
     fun clearScanState() {
         _scanState.value = ScanState.Idle
     }

@@ -21,6 +21,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
@@ -95,9 +96,16 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
     var showCreateRepo by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showServiceConfig by remember { mutableStateOf(false) }
+    var showAccountList by remember { mutableStateOf(false) }
     var showClearHistoryConfirm by remember { mutableStateOf(false) }
     /** 从仓库列表跳转新建时带入的令牌（可能尚未保存到 DataStore） */
     var createRepoToken by remember { mutableStateOf("") }
+
+    // 账户管理页（多账户：新建/切换/重命名/删除）
+    if (showAccountList) {
+        AccountListScreen(vm = vm, onBack = { showAccountList = false })
+        return
+    }
 
     // 服务配置页独立成页面（协议 / 端口 / 访问账号），返回后回到主界面
     if (showServiceConfig) {
@@ -198,7 +206,9 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
             item {
                 SectionCard(
                     title = if (settings.isConfigured) {
-                        "${runCatching { ServerMode.valueOf(settings.mode) }.getOrDefault(ServerMode.WEBDAV).label} 服务"
+                        val accName = settings.activeAccount?.name ?: ""
+                        "${runCatching { ServerMode.valueOf(settings.mode) }.getOrDefault(ServerMode.WEBDAV).label} 服务" +
+                            (accName.takeIf { it.isNotBlank() }?.let { " · $it" } ?: "")
                     } else {
                         "服务"
                     },
@@ -315,7 +325,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                             }
                         }
                     }
-                    // 第二行：仓库 / 服务配置，各自打开对应页面（仓库配置已改为仓库列表）
+                    // 第二行：仓库 / 服务配置 / 账户，各自打开对应页面
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -338,6 +348,14 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                             Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.width(18.dp))
                             Spacer(Modifier.width(6.dp))
                             Text("服务配置", maxLines = 1)
+                        }
+                        FilledTonalButton(
+                            onClick = { showAccountList = true },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Icon(Icons.Filled.Person, contentDescription = null, modifier = Modifier.width(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("账户", maxLines = 1)
                         }
                     }
                 }
