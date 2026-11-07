@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -103,18 +104,22 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
 
     // 账户管理页（多账户：新建/切换/重命名/删除）
     if (showAccountList) {
+        // 系统返回键：回到主界面而不是退出应用
+        BackHandler { showAccountList = false }
         AccountListScreen(vm = vm, onBack = { showAccountList = false })
         return
     }
 
     // 服务配置页独立成页面（协议 / 端口 / 访问账号），返回后回到主界面
     if (showServiceConfig) {
+        BackHandler { showServiceConfig = false }
         ServiceConfigScreen(vm = vm, onBack = { showServiceConfig = false })
         return
     }
 
     // 设置页独立成页面（网络与后台类选项），返回后回到主界面
     if (showSettings) {
+        BackHandler { showSettings = false }
         SettingsScreen(vm = vm, onBack = { showSettings = false })
         return
     }
@@ -325,7 +330,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                             }
                         }
                     }
-                    // 第二行：仓库 / 服务配置 / 账户，各自打开对应页面
+                    // 第二行：仓库 / 服务配置（各占半行，避免三按钮挤压导致文字被压没）
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -349,9 +354,16 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                             Spacer(Modifier.width(6.dp))
                             Text("服务配置", maxLines = 1)
                         }
+                    }
+                    // 第三行：账户（独占整行）
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 0.dp),
+                    ) {
                         FilledTonalButton(
                             onClick = { showAccountList = true },
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier.fillMaxWidth(),
                         ) {
                             Icon(Icons.Filled.Person, contentDescription = null, modifier = Modifier.width(18.dp))
                             Spacer(Modifier.width(6.dp))
