@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -25,11 +24,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -43,6 +44,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,6 +62,7 @@ import com.kleinops.gitmount.data.RepoBrief
 import com.kleinops.gitmount.data.ServerMode
 import com.kleinops.gitmount.service.LogBus
 import com.kleinops.gitmount.service.MountService
+import com.kleinops.gitmount.ui.components.InfoRow
 import com.kleinops.gitmount.ui.components.SectionCard
 
 /**
@@ -78,6 +81,7 @@ fun AccountEditScreen(
     val settings by vm.settings.collectAsStateWithLifecycle()
     val server by vm.serverState.collectAsStateWithLifecycle()
     val scanState by vm.scanState.collectAsStateWithLifecycle()
+    val repoOpState by vm.repoOpState.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     val isNew = account == null
@@ -101,21 +105,48 @@ fun AccountEditScreen(
     var password by remember(account?.id) { mutableStateOf(account?.password ?: "") }
     var showPassword by remember { mutableStateOf(false) }
 
-    // ---- 仓库绑定（列表选择）----
+    // ---- 仓库绑定（选择放到独立页面，配置页只做展示 + 容量/清空历史）----
     var bindingRepo by remember(account?.id) { mutableStateOf<RepoBrief?>(null) }
     var unbind by remember(account?.id) { mutableStateOf(false) }
-    // 「新建仓库」面板（页面内展开，非弹窗）
-    var showNewRepo by remember(account?.id) { mutableStateOf(false) }
-    var newRepoName by remember(account?.id) { mutableStateOf("") }
-    var newRepoPrivate by remember(account?.id) { mutableStateOf(true) }
-    var creatingRepo by remember(account?.id) { mutableStateOf(false) }
+    // 独立「选择仓库」页面开关
+    var showRepoSelect by remember(account?.id) { mutableStateOf(false) }
+    // 清空提交历史确认对话框
+    var showClearHistoryConfirm by remember(account?.id) { mutableStateOf(false) }
 
     val effectToken = token.trim().ifBlank { shared }
-    val isWorking = scanState is ScanState.Working || creatingRepo
     val currentOwner = account?.owner ?: ""
     val currentRepo = account?.repoName ?: ""
     val currentBinding = bindingRepo?.let { it.fullName }
         ?: if (currentOwner.isNotBlank() && currentRepo.isNotBlank()) "$currentOwner/$currentRepo" else ""
+
+    // 容量/清空历史针对的仓库 = 配置页当前所选（bindingRepo 优先，未选则用挂载点旧绑定）
+    val repoOwner = bindingRepo?.fullName?.substringBefore('/') ?: currentOwner
+    val repoName = bindingRepo?.fullName?.substringAfter('/') ?: currentRepo
+    val repoBranch = bindingRepo?.defaultBranch ?: (account?.branch ?: "main")
+    val hasRepo = currentBinding.isNotBlank() && !unbind
+
+    // 已绑定仓库且令牌有效时自动查询容量（换仓库/换令牌自动重查）
+    LaunchedEffect(repoOwner, repoName, effectToken) {
+        if (hasRepo && effectToken.isNotBlank()) {
+            vm.loadRepoInfo(effectToken, repoOwner, repoName)
+        }
+    }
+
+    if (showRepoSelect) {
+        RepoSelectScreen(
+            vm = vm,
+            effectToken = effectToken,
+            bindingRepo = bindingRepo,
+            currentBinding = currentBinding,
+            onPick = { r ->
+                bindingRepo = r
+                unbind = false
+                showRepoSelect = false
+            },
+            onBack = { showRepoSelect = false },
+        )
+        return
+    }
 
     Scaffold(
         topBar = {
@@ -193,193 +224,133 @@ fun AccountEditScreen(
                 )
             }
 
-            // ---- 分区二：绑定仓库（列表选择，点击即绑定）----
-            SectionCard(title = "绑定仓库") {
-                if (unbind) {
+            // ---- 分区二：仓库（展示 + 容量 + 清空历史，选择走独立页面）----
+            SectionCard(title = "仓库") {
+                if (!hasRepo) {
                     Text(
-                        "已选择解绑：保存后该挂载点不再绑定任何仓库。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
+                        "尚未绑定仓库。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Spacer(Modifier.height(8.dp))
-                } else if (currentBinding.isNotBlank()) {
-                    Text(
-                        "当前绑定：$currentBinding",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                    Spacer(Modifier.height(8.dp))
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = {
-                            unbind = false
-                            if (effectToken.isBlank()) return@OutlinedButton
-                            vm.scanRepos(effectToken)
-                        },
-                        enabled = effectToken.isNotBlank() && !isWorking,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        if (scanState is ScanState.Working) {
-                            CircularProgressIndicator(modifier = Modifier.width(14.dp), strokeWidth = 2.dp)
-                            Spacer(Modifier.width(8.dp))
-                            Text("扫描中…")
-                        } else {
-                            Text("扫描我的仓库")
-                        }
-                    }
-                    OutlinedButton(
-                        onClick = { showNewRepo = !showNewRepo },
-                        enabled = effectToken.isNotBlank() && !isWorking,
-                        modifier = Modifier.weight(1f),
-                    ) { Text("新建仓库") }
-                }
-                Spacer(Modifier.height(8.dp))
-                if (currentBinding.isNotBlank()) {
-                    TextButton(
-                        onClick = { unbind = !unbind; if (unbind) bindingRepo = null },
-                    ) { Text(if (unbind) "取消解绑" else "解绑仓库") }
-                    Spacer(Modifier.height(4.dp))
-                }
-                when (val s = scanState) {
-                    is ScanState.Working -> Unit
-                    is ScanState.Error -> Text(
-                        "扫描失败：${s.message}",
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    is ScanState.Success -> {
+                    if (unbind) {
+                        Spacer(Modifier.height(6.dp))
                         Text(
-                            "账号 ${s.login}，共 ${s.repos.size} 个仓库。点击仓库即绑定。",
+                            "已选择解绑：保存后该挂载点不再绑定任何仓库。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedButton(
+                        onClick = { showRepoSelect = true },
+                        enabled = effectToken.isNotBlank(),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("选择仓库") }
+                    if (unbind) {
+                        Spacer(Modifier.height(6.dp))
+                        TextButton(onClick = { unbind = false }) { Text("取消解绑") }
+                    }
+                } else {
+                    InfoRow("仓库", currentBinding, mono = true)
+                    InfoRow("分支", repoBranch, mono = true)
+
+                    Spacer(Modifier.height(8.dp))
+                    // ---- 容量展示（同步恢复旧版容量卡片）----
+                    when (val op = repoOpState) {
+                        is RepoOpState.Loading -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.width(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("正在查询容量…", style = MaterialTheme.typography.bodySmall)
+                        }
+                        is RepoOpState.Error -> Text(
+                            "容量查询失败：${op.message}",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        is RepoOpState.ClearingHistory -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.width(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("正在清空提交历史…", style = MaterialTheme.typography.bodySmall)
+                        }
+                        is RepoOpState.Success -> {
+                            val info = op.info
+                            InfoRow("仓库类型", if (info.isPrivate) "私有" else "公开", mono = true)
+                            InfoRow("已用容量", info.usedHuman, mono = true)
+                            if (info.isPrivate) {
+                                InfoRow("剩余容量", info.remainingHuman, mono = true)
+                                InfoRow(
+                                    "占用比例",
+                                    "${info.percentUsed}% / 500MB",
+                                    mono = true,
+                                    valueColor = if (info.percentUsed >= 90) MaterialTheme.colorScheme.error
+                                    else MaterialTheme.colorScheme.primary,
+                                )
+                                Spacer(Modifier.height(6.dp))
+                                LinearProgressIndicator(
+                                    progress = { info.percentUsed / 100f },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                                if (info.exceeded) {
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        "已超出仓库容量上限！请清理文件或清空提交历史。",
+                                        color = MaterialTheme.colorScheme.error,
+                                        style = MaterialTheme.typography.labelSmall,
+                                    )
+                                }
+                            } else {
+                                Text(
+                                    "公开仓库无存储配额上限",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        RepoOpState.Idle -> Text(
+                            "未查询容量（点击下方刷新）",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        Spacer(Modifier.height(6.dp))
-                        if (s.repos.isNotEmpty()) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(max = 300.dp)
-                                    .verticalScroll(rememberScrollState()),
-                                verticalArrangement = Arrangement.spacedBy(4.dp),
-                            ) {
-                                s.repos.forEach { r ->
-                                    val full = r.fullName
-                                    val isCurrent = bindingRepo?.fullName == full ||
-                                        (bindingRepo == null && !unbind && full.equals(
-                                            currentBinding,
-                                            ignoreCase = true,
-                                        ))
-                                    // 选中态颜色平滑过渡（MD3 动效）
-                                    val rowColor by animateColorAsState(
-                                        targetValue = if (isCurrent) MaterialTheme.colorScheme.secondaryContainer
-                                        else MaterialTheme.colorScheme.surfaceVariant,
-                                        animationSpec = tween(180, easing = FastOutSlowInEasing),
-                                        label = "repoRowColor",
-                                    )
-                                    Surface(
-                                        onClick = {
-                                            bindingRepo = r
-                                            unbind = false
-                                        },
-                                        modifier = Modifier.fillMaxWidth(),
-                                        shape = MaterialTheme.shapes.small,
-                                        color = rowColor,
-                                    ) {
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                        ) {
-                                            Text(
-                                                if (isCurrent) "✓ " else "  ",
-                                                color = MaterialTheme.colorScheme.primary,
-                                                style = MaterialTheme.typography.bodyMedium,
-                                            )
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(
-                                                    (if (r.isPrivate) "🔒 " else "") + full,
-                                                    maxLines = 1,
-                                                    style = MaterialTheme.typography.bodyMedium,
-                                                )
-                                                Text(
-                                                    "默认分支 ${r.defaultBranch}",
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
                     }
-                    else -> Unit
-                }
 
-                // 「新建仓库」面板（页面内展开，带展开/收起动效）
-                AnimatedVisibility(
-                    visible = showNewRepo,
-                    enter = expandVertically(
-                        expandFrom = Alignment.Top,
-                        animationSpec = tween(240, easing = FastOutSlowInEasing),
-                    ) + fadeIn(tween(240)),
-                    exit = shrinkVertically(
-                        shrinkTowards = Alignment.Top,
-                        animationSpec = tween(200, easing = FastOutSlowInEasing),
-                    ) + fadeOut(tween(200)),
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        OutlinedTextField(
-                            value = newRepoName,
-                            onValueChange = { newRepoName = it },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            label = { Text("新仓库名称") },
-                            placeholder = { Text("例如 my-repo") },
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
+                    Spacer(Modifier.height(10.dp))
+                    val busy = repoOpState is RepoOpState.Loading || repoOpState is RepoOpState.ClearingHistory
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { showRepoSelect = true },
+                            enabled = effectToken.isNotBlank() && !busy,
+                            modifier = Modifier.weight(1f),
+                        ) { Text("选择仓库") }
+                        OutlinedButton(
+                            onClick = { vm.loadRepoInfo(effectToken, repoOwner, repoName) },
+                            enabled = !busy,
+                            modifier = Modifier.weight(1f),
+                        ) { Text("刷新容量") }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { showClearHistoryConfirm = true },
+                            enabled = repoOpState !is RepoOpState.ClearingHistory,
+                            modifier = Modifier.weight(1f),
                         ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(if (newRepoPrivate) "私有仓库" else "公开仓库", style = MaterialTheme.typography.bodyMedium)
-                            Text(
-                                "私有：仅自己和受邀协作者可见",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        Switch(checked = newRepoPrivate, onCheckedChange = { newRepoPrivate = it })
-                    }
-                    Button(
-                        enabled = !creatingRepo && newRepoName.trim().isNotBlank(),
-                        onClick = {
-                            creatingRepo = true
-                            vm.createRepoOnly(effectToken, newRepoName.trim(), newRepoPrivate) { brief ->
-                                creatingRepo = false
-                                showNewRepo = false
-                                newRepoName = ""
-                                if (brief != null) {
-                                    bindingRepo = brief
-                                    unbind = false
-                                    LogBus.info("仓库 ${brief.fullName} 创建成功，已选中")
-                                }
+                            if (repoOpState is RepoOpState.ClearingHistory) {
+                                CircularProgressIndicator(modifier = Modifier.width(14.dp), strokeWidth = 2.dp)
+                                Spacer(Modifier.width(6.dp))
+                                Text("清空中…")
+                            } else {
+                                Text("清空提交历史")
                             }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        if (creatingRepo) {
-                            CircularProgressIndicator(modifier = Modifier.width(14.dp), strokeWidth = 2.dp)
-                            Spacer(Modifier.width(8.dp))
-                            Text("创建中…")
-                        } else {
-                            Text("创建并绑定")
                         }
-                    }
+                        TextButton(
+                            onClick = {
+                                unbind = true
+                                bindingRepo = null
+                                vm.clearRepoOpState()
+                            },
+                            enabled = !busy,
+                            modifier = Modifier.weight(1f),
+                        ) { Text("解绑") }
                     }
                 }
             }
@@ -515,6 +486,252 @@ fun AccountEditScreen(
             ) { Text(if (isNew) "创建挂载点" else "保存") }
 
             Spacer(Modifier.height(24.dp))
+        }
+    }
+
+    if (showClearHistoryConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearHistoryConfirm = false },
+            title = { Text("清空提交历史？") },
+            text = {
+                Text(
+                    "将把仓库 $currentBinding 的全部提交历史压缩为 1 个（文件全部保留）。" +
+                        "此操作不可撤销；容量数字由 GitHub 后台延迟回收，不会立即下降。"
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showClearHistoryConfirm = false
+                        vm.clearRepoHistory(effectToken, repoOwner, repoName, repoBranch)
+                    },
+                ) { Text("确认清空") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearHistoryConfirm = false }) { Text("取消") }
+            },
+        )
+    }
+}
+
+/**
+ * 选择仓库全屏页：从 Token 名下扫描并选择要绑定的仓库，或就地新建仓库。
+ * 与配置页分离——仓库多时扫描列表 + 新建面板不会挤占日常配置空间；
+ * 选完即返回配置页，容量/清空历史等操作仍在配置页的「仓库」卡片里做。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RepoSelectScreen(
+    vm: MainViewModel,
+    effectToken: String,
+    bindingRepo: RepoBrief?,
+    currentBinding: String,
+    onPick: (RepoBrief) -> Unit,
+    onBack: () -> Unit,
+) {
+    val scanState by vm.scanState.collectAsStateWithLifecycle()
+    // 「新建仓库」面板（页面内展开，非弹窗）
+    var showNewRepo by remember { mutableStateOf(false) }
+    var newRepoName by remember { mutableStateOf("") }
+    var newRepoPrivate by remember { mutableStateOf(true) }
+    var creatingRepo by remember { mutableStateOf(false) }
+
+    // 进入页面自动扫描一次（5 分钟内带缓存，不会重复请求）
+    LaunchedEffect(effectToken) {
+        if (scanState !is ScanState.Success) vm.scanRepos(effectToken)
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("选择仓库") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            // 扫描 / 新建按钮行
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { vm.scanRepos(effectToken) },
+                    enabled = effectToken.isNotBlank() && scanState !is ScanState.Working,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    if (scanState is ScanState.Working) {
+                        CircularProgressIndicator(modifier = Modifier.width(14.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text("扫描中…")
+                    } else {
+                        Text("刷新仓库列表")
+                    }
+                }
+                OutlinedButton(
+                    onClick = { showNewRepo = !showNewRepo },
+                    enabled = effectToken.isNotBlank() && scanState !is ScanState.Working,
+                    modifier = Modifier.weight(1f),
+                ) { Text(if (showNewRepo) "收起新建" else "新建仓库") }
+            }
+
+            // 「新建仓库」面板（带展开/收起动效）
+            AnimatedVisibility(
+                visible = showNewRepo,
+                enter = expandVertically(
+                    expandFrom = Alignment.Top,
+                    animationSpec = tween(240, easing = FastOutSlowInEasing),
+                ) + fadeIn(tween(240)),
+                exit = shrinkVertically(
+                    shrinkTowards = Alignment.Top,
+                    animationSpec = tween(200, easing = FastOutSlowInEasing),
+                ) + fadeOut(tween(200)),
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(
+                        value = newRepoName,
+                        onValueChange = { newRepoName = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("新仓库名称") },
+                        placeholder = { Text("例如 my-repo") },
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(if (newRepoPrivate) "私有仓库" else "公开仓库", style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                "私有：仅自己和受邀协作者可见",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Switch(checked = newRepoPrivate, onCheckedChange = { newRepoPrivate = it })
+                    }
+                    Button(
+                        enabled = !creatingRepo && newRepoName.trim().isNotBlank(),
+                        onClick = {
+                            creatingRepo = true
+                            vm.createRepoOnly(effectToken, newRepoName.trim(), newRepoPrivate) { brief ->
+                                creatingRepo = false
+                                if (brief != null) {
+                                    onPick(brief)
+                                    LogBus.info("仓库 ${brief.fullName} 创建成功，已选中")
+                                } else {
+                                    showNewRepo = false
+                                    newRepoName = ""
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        if (creatingRepo) {
+                            CircularProgressIndicator(modifier = Modifier.width(14.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("创建中…")
+                        } else {
+                            Text("创建并绑定")
+                        }
+                    }
+                }
+            }
+
+            // 仓库列表
+            when (val s = scanState) {
+                is ScanState.Working -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.width(16.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
+                    Text("正在扫描仓库…", style = MaterialTheme.typography.bodySmall)
+                }
+                is ScanState.Error -> Column {
+                    Text(
+                        "扫描失败：${s.message}",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    TextButton(onClick = { vm.scanRepos(effectToken) }) { Text("重试") }
+                }
+                is ScanState.Success -> {
+                    Text(
+                        "账号 ${s.login}，共 ${s.repos.size} 个仓库。点击仓库即绑定。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    if (s.repos.isEmpty()) {
+                        Text(
+                            "该账号下没有可用的仓库。可以点上方「新建仓库」。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f)
+                                .verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            s.repos.forEach { r ->
+                                val full = r.fullName
+                                val isCurrent = bindingRepo?.fullName == full ||
+                                    (bindingRepo == null && full.equals(currentBinding, ignoreCase = true))
+                                // 选中态颜色平滑过渡（MD3 动效）
+                                val rowColor by animateColorAsState(
+                                    targetValue = if (isCurrent) MaterialTheme.colorScheme.secondaryContainer
+                                    else MaterialTheme.colorScheme.surfaceVariant,
+                                    animationSpec = tween(180, easing = FastOutSlowInEasing),
+                                    label = "repoRowColor",
+                                )
+                                Surface(
+                                    onClick = { onPick(r) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = MaterialTheme.shapes.small,
+                                    color = rowColor,
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(
+                                            if (isCurrent) "✓ " else "  ",
+                                            color = MaterialTheme.colorScheme.primary,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                        )
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                (if (r.isPrivate) "🔒 " else "") + full,
+                                                maxLines = 1,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                            )
+                                            Text(
+                                                "默认分支 ${r.defaultBranch}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                else -> Unit
+            }
         }
     }
 }
