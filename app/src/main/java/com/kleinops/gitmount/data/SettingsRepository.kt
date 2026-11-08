@@ -16,7 +16,9 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
@@ -81,22 +83,52 @@ object TokenCrypto {
     private const val ANDROID_KEYSTORE = "AndroidKeyStore"
     private const val TRANSFORMATION = "AES/GCM/NoPadding"
 
+    /**
+     * Keystore 密钥内存缓存：Android Keystore 的 getInstance/load/getEntry 每次
+     * 都是 binder 跨进程调用（单次 50~200ms），而 settings 流每次 DataStore emit
+     * 都要为每个挂载点 token 解密一次——不缓存时一路拖慢开关/设置的读取链。
+     * 密钥一旦生成不会变化（alias 固定），缓存到内存安全；即使密钥被系统删除，
+     * decrypt 走 catch 返回空串，与过去行为一致。
+     */
+    @Volatile
+    private var cachedKey: SecretKey? = null
+
     private fun getOrCreateKey(): SecretKey {
-        val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-        (ks.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
-        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
-        generator.init(
-            KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(256)
-                .build()
-        )
-        return generator.generateKey()
+        cachedKey?.let { return it }
+        synchronized(this) {
+            cachedKey?.let { return it }
+            val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            (ks.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry)?.let {
+                cachedKey = it.secretKey
+                return it.secretKey
+            }
+            val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+            generator.init(
+                KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setKeySize(256)
+                    .build()
+            )
+            val key = generator.generateKey()
+            cachedKey = key
+            return key
+        }
     }
 
     fun encrypt(plain: String): String {
         if (plain.isEmpty()) return ""
+        return try {
+            doEncrypt(plain)
+        } catch (e: Exception) {
+            // 运行期密钥失效（如系统清空凭据/恢复出厂）：清缓存重建一次，
+            // 与原版"每次检查 keystore、不存在即生成"的语义保持一致，避免加密直接崩溃。
+            cachedKey = null
+            doEncrypt(plain)
+        }
+    }
+
+    private fun doEncrypt(plain: String): String {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
         val iv = cipher.iv
@@ -107,18 +139,30 @@ object TokenCrypto {
     fun decrypt(blob: String): String {
         if (blob.isEmpty()) return ""
         return try {
-            val parts = blob.split(":", limit = 2)
-            if (parts.size != 2) return ""
-            val cipher = Cipher.getInstance(TRANSFORMATION)
-            cipher.init(
-                Cipher.DECRYPT_MODE,
-                getOrCreateKey(),
-                GCMParameterSpec(128, Base64.decode(parts[0], Base64.NO_WRAP))
-            )
-            String(cipher.doFinal(Base64.decode(parts[1], Base64.NO_WRAP)), Charsets.UTF_8)
+            doDecrypt(blob)
         } catch (e: Exception) {
-            ""
+            // 密钥失效（系统清空凭据/恢复出厂）：清缓存重建后再试一次，
+            // 保持原版"每次进 keystore 拿当前密钥"的语义，避免缓存导致旧密钥
+            // 失效后所有 token 解密成空串、用户配置看起来"全丢"。
+            cachedKey = null
+            try {
+                doDecrypt(blob)
+            } catch (_: Exception) {
+                ""
+            }
         }
+    }
+
+    private fun doDecrypt(blob: String): String {
+        val parts = blob.split(":", limit = 2)
+        if (parts.size != 2) return ""
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            getOrCreateKey(),
+            GCMParameterSpec(128, Base64.decode(parts[0], Base64.NO_WRAP))
+        )
+        return String(cipher.doFinal(Base64.decode(parts[1], Base64.NO_WRAP)), Charsets.UTF_8)
     }
 }
 
@@ -172,6 +216,7 @@ class SettingsRepository(private val context: Context) {
             sharedToken = sharedToken,
         )
     }
+        .flowOn(Dispatchers.IO)
 
     /** 解析挂载点 JSON（[{id,name,token,owner,repoName,branch,mode,ftpPort,webdavPort,username,password}]） */
     private fun parseMountPointsJson(json: String?): List<MountPointConfig> {
