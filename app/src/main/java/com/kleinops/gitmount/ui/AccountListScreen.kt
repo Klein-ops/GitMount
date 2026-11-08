@@ -1,5 +1,12 @@
 package com.kleinops.gitmount.ui
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -60,38 +67,99 @@ import com.kleinops.gitmount.ui.components.SectionCard
 @Composable
 fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
     val settings by vm.settings.collectAsStateWithLifecycle()
-    val server by vm.serverState.collectAsStateWithLifecycle()
-    val context = LocalContext.current
 
     val accounts = settings.accounts
-    val shared = settings.sharedToken
 
     var sharedToken by remember(settings.sharedToken) { mutableStateOf(settings.sharedToken) }
     var showSharedToken by remember { mutableStateOf(false) }
 
-    // 页面导航：新建 / 编辑走向全屏配置页
+    // 页面导航：新建 / 编辑走向全屏配置页，用 AnimatedContent 做进出手势动效
     var creating by remember { mutableStateOf(false) }
     var editTarget by remember { mutableStateOf<AccountConfig?>(null) }
     var deleteTarget by remember { mutableStateOf<AccountConfig?>(null) }
 
-    if (creating) {
-        AccountEditScreen(
-            vm = vm,
-            account = null,
-            onBack = { creating = false },
-            onSaved = { creating = false },
-        )
-        return
+    // 页面层级：0=账户列表，1=新建挂载点，2=编辑挂载点
+    // 用 targetState > initialState 判断前进/后退：前进右侧滑入，后退左侧退回
+    AnimatedContent(
+        targetState = when {
+            creating -> 1
+            editTarget != null -> 2
+            else -> 0
+        },
+        transitionSpec = {
+            if (targetState > initialState) {
+                (slideInHorizontally(tween(300)) { it } + fadeIn(tween(300)))
+                    .togetherWith(slideOutHorizontally(tween(300)) { -it / 3 } + fadeOut(tween(300)))
+            } else {
+                (slideInHorizontally(tween(300)) { -it / 3 } + fadeIn(tween(300)))
+                    .togetherWith(slideOutHorizontally(tween(300)) { it } + fadeOut(tween(300)))
+            }
+        },
+        label = "accountListNav",
+    ) { page ->
+        when (page) {
+            1 -> AccountEditScreen(
+                vm = vm,
+                account = null,
+                onBack = { creating = false },
+                onSaved = { creating = false },
+            )
+            2 -> editTarget?.let { acc ->
+                AccountEditScreen(
+                    vm = vm,
+                    account = acc,
+                    onBack = { editTarget = null },
+                    onSaved = { editTarget = null },
+                )
+            }
+            else -> AccountListContent(
+                vm = vm,
+                accounts = accounts,
+                sharedToken = sharedToken,
+                showSharedToken = showSharedToken,
+                onSharedTokenChange = { sharedToken = it },
+                onToggleSharedToken = { showSharedToken = !showSharedToken },
+                onBack = onBack,
+                onCreate = { creating = true },
+                onEdit = { editTarget = it },
+                onDelete = { deleteTarget = it },
+            )
+        }
     }
-    editTarget?.let { acc ->
-        AccountEditScreen(
-            vm = vm,
-            account = acc,
-            onBack = { editTarget = null },
-            onSaved = { editTarget = null },
+
+    // 删除账户确认
+    deleteTarget?.let { acc ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("删除挂载点？") },
+            text = { Text("将删除挂载点「${acc.name}」及其仓库绑定、端口与访问账号配置。此操作不可撤销。") },
+            confirmButton = {
+                Button(onClick = { vm.deleteAccount(acc.id); deleteTarget = null }) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteTarget = null }) { Text("取消") }
+            },
         )
-        return
     }
+}
+
+/** 账户列表页主体内容（与原 AccountListScreen 的主 Scaffold 一致，抽出以便 AnimatedContent 切换） */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AccountListContent(
+    vm: MainViewModel,
+    accounts: List<AccountConfig>,
+    sharedToken: String,
+    showSharedToken: Boolean,
+    onSharedTokenChange: (String) -> Unit,
+    onToggleSharedToken: () -> Unit,
+    onBack: () -> Unit,
+    onCreate: () -> Unit,
+    onEdit: (AccountConfig) -> Unit,
+    onDelete: (AccountConfig) -> Unit,
+) {
+    val server by vm.serverState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
 
     // 账户开关切换：落盘后若服务在运行，自动重启让新开关生效
     fun onToggle(acc: AccountConfig, enabled: Boolean) {
@@ -113,7 +181,7 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
                     }
                 },
                 actions = {
-                    IconButton(onClick = { creating = true }) {
+                    IconButton(onClick = onCreate) {
                         Icon(Icons.Filled.Add, contentDescription = "新建挂载点")
                     }
                 },
@@ -140,7 +208,7 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
                 Spacer(Modifier.height(10.dp))
                 OutlinedTextField(
                     value = sharedToken,
-                    onValueChange = { sharedToken = it },
+                    onValueChange = onSharedTokenChange,
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     label = { Text("GitHub 访问令牌（全部挂载点共用）") },
@@ -148,7 +216,7 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
                     visualTransformation = if (showSharedToken) VisualTransformation.None else PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     trailingIcon = {
-                        IconButton(onClick = { showSharedToken = !showSharedToken }) {
+                        IconButton(onClick = onToggleSharedToken) {
                             Icon(
                                 if (showSharedToken) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
                                 contentDescription = if (showSharedToken) "隐藏令牌" else "显示令牌",
@@ -184,8 +252,8 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
                                 enabled = acc.enabled,
                                 activeNow = AccountManager.isActive(acc.id),
                                 onToggle = { onToggle(acc, it) },
-                                onClick = { editTarget = acc },
-                                onDelete = { deleteTarget = acc },
+                                onClick = { onEdit(acc) },
+                                onDelete = { onDelete(acc) },
                             )
                         }
                     }
@@ -194,7 +262,7 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
 
             Spacer(Modifier.height(4.dp))
             OutlinedButton(
-                onClick = { creating = true },
+                onClick = onCreate,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.width(18.dp))
@@ -211,21 +279,6 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
             )
             Spacer(Modifier.height(24.dp))
         }
-    }
-
-    // 删除账户确认
-    deleteTarget?.let { acc ->
-        AlertDialog(
-            onDismissRequest = { deleteTarget = null },
-            title = { Text("删除挂载点？") },
-            text = { Text("将删除挂载点「${acc.name}」及其仓库绑定、端口与访问账号配置。此操作不可撤销。") },
-            confirmButton = {
-                Button(onClick = { vm.deleteAccount(acc.id); deleteTarget = null }) { Text("删除") }
-            },
-            dismissButton = {
-                TextButton(onClick = { deleteTarget = null }) { Text("取消") }
-            },
-        )
     }
 }
 

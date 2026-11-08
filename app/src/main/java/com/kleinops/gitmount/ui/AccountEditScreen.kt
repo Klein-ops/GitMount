@@ -1,5 +1,6 @@
 package com.kleinops.gitmount.ui
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -8,6 +9,9 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,10 +27,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -133,22 +139,34 @@ fun AccountEditScreen(
         }
     }
 
-    if (showRepoSelect) {
-        RepoSelectScreen(
-            vm = vm,
-            effectToken = effectToken,
-            bindingRepo = bindingRepo,
-            currentBinding = currentBinding,
-            onPick = { r ->
-                bindingRepo = r
-                unbind = false
-                showRepoSelect = false
-            },
-            onBack = { showRepoSelect = false },
-        )
-        return
-    }
-
+    // 配置页 ↔ 选择仓库页：用 AnimatedContent 做进出手势动效（与主界面/挂载点页一致）
+    AnimatedContent(
+        targetState = showRepoSelect,
+        transitionSpec = {
+            if (targetState) {
+                (slideInHorizontally(tween(300)) { it } + fadeIn(tween(300)))
+                    .togetherWith(slideOutHorizontally(tween(300)) { -it / 3 } + fadeOut(tween(300)))
+            } else {
+                (slideInHorizontally(tween(300)) { -it / 3 } + fadeIn(tween(300)))
+                    .togetherWith(slideOutHorizontally(tween(300)) { it } + fadeOut(tween(300)))
+            }
+        },
+        label = "repoSelectNav",
+    ) { showSelect ->
+        if (showSelect) {
+            RepoSelectScreen(
+                vm = vm,
+                effectToken = effectToken,
+                bindingRepo = bindingRepo,
+                currentBinding = currentBinding,
+                onPick = { r ->
+                    bindingRepo = r
+                    unbind = false
+                    showRepoSelect = false
+                },
+                onBack = { showRepoSelect = false },
+            )
+        } else {
     Scaffold(
         topBar = {
             TopAppBar(
@@ -489,6 +507,8 @@ fun AccountEditScreen(
             Spacer(Modifier.height(24.dp))
         }
     }
+        }
+    }
 
     if (showClearHistoryConfirm) {
         AlertDialog(
@@ -536,6 +556,13 @@ private fun RepoSelectScreen(
     var newRepoName by remember { mutableStateOf("") }
     var newRepoPrivate by remember { mutableStateOf(true) }
     var creatingRepo by remember { mutableStateOf(false) }
+
+    // 删除仓库：三级确认（①确认删除？→ ②再次确认？→ ③输入完整仓库名）
+    // deleteStep：null=未删除，1=第一次确认，2=第二次确认，3=输入完整名
+    var deleteTarget by remember { mutableStateOf<RepoBrief?>(null) }
+    var deleteStep by remember { mutableStateOf(0) }
+    var deleteInput by remember { mutableStateOf("") }
+    var deletingRepo by remember { mutableStateOf(false) }
 
     // 进入页面自动扫描一次（5 分钟内带缓存，不会重复请求）
     LaunchedEffect(effectToken) {
@@ -725,6 +752,19 @@ private fun RepoSelectScreen(
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             )
                                         }
+                                        IconButton(
+                                            onClick = {
+                                                deleteTarget = r
+                                                deleteStep = 1
+                                                deleteInput = ""
+                                            },
+                                        ) {
+                                            Icon(
+                                                Icons.Filled.Delete,
+                                                contentDescription = "删除仓库 $full",
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -733,6 +773,98 @@ private fun RepoSelectScreen(
                 }
                 else -> Unit
             }
+        }
+    }
+
+    // ---- 删除仓库三级确认 ----
+    deleteTarget?.let { target ->
+        val fullName = target.fullName
+        when (deleteStep) {
+            // 第 1 级：首次确认
+            1 -> AlertDialog(
+                onDismissRequest = { deleteTarget = null; deleteStep = 0; deleteInput = "" },
+                title = { Text("删除仓库 $fullName？") },
+                text = { Text("这将永久删除 GitHub 上的仓库 $fullName，包括其中全部文件、提交历史与设置。此操作不可撤销！") },
+                confirmButton = {
+                    Button(
+                        onClick = { deleteStep = 2 },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                    ) { Text("继续") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { deleteTarget = null; deleteStep = 0; deleteInput = "" }) { Text("取消") }
+                },
+            )
+            // 第 2 级：二次确认
+            2 -> AlertDialog(
+                onDismissRequest = { deleteTarget = null; deleteStep = 0; deleteInput = "" },
+                title = { Text("再次确认删除？") },
+                text = { Text("你确定要删除仓库 $fullName 吗？仓库一旦删除无法恢复，GitHub 不会保留任何备份。") },
+                confirmButton = {
+                    Button(
+                        onClick = { deleteStep = 3 },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                    ) { Text("我确定要删除") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { deleteTarget = null; deleteStep = 0; deleteInput = "" }) { Text("取消") }
+                },
+            )
+            // 第 3 级：输入完整仓库名校验
+            3 -> AlertDialog(
+                onDismissRequest = { deleteTarget = null; deleteStep = 0; deleteInput = "" },
+                title = { Text("输入仓库全名以确认") },
+                text = {
+                    Column {
+                        Text("请输入仓库完整名称以确认删除（不可撤销）：")
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = deleteInput,
+                            onValueChange = { deleteInput = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            label = { Text("仓库全名") },
+                            placeholder = { Text(fullName) },
+                        )
+                        if (deletingRepo) {
+                            Spacer(Modifier.height(10.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                Spacer(Modifier.width(8.dp))
+                                Text("正在删除…", style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            if (deletingRepo) return@Button
+                            if (deleteInput.trim() != fullName) return@Button
+                            deletingRepo = true
+                            val owner = fullName.substringBefore('/')
+                            val repo = fullName.substringAfter('/')
+                            vm.deleteRepo(effectToken, owner, repo) { result ->
+                                deletingRepo = false
+                                deleteTarget = null
+                                deleteStep = 0
+                                deleteInput = ""
+                                result.onFailure {
+                                    LogBus.error("删除仓库失败：${it.message}")
+                                }
+                            }
+                        },
+                        enabled = deleteInput.trim() == fullName && !deletingRepo,
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                    ) { Text(if (deletingRepo) "删除中…" else "永久删除") }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { deleteTarget = null; deleteStep = 0; deleteInput = "" },
+                        enabled = !deletingRepo,
+                    ) { Text("取消") }
+                },
+            )
         }
     }
 }
