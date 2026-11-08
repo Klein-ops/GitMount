@@ -108,7 +108,7 @@ fun AccountEditScreen(
     }
     var ftpPort by remember(account?.id) { mutableStateOf((account?.ftpPort ?: 2121).toString()) }
     var webdavPort by remember(account?.id) { mutableStateOf((account?.webdavPort ?: 8080).toString()) }
-    var username by remember(account?.id) { mutableStateOf(account?.username ?: "gitmount") }
+    var username by remember(account?.id) { mutableStateOf(account?.username ?: "") }
     var password by remember(account?.id) { mutableStateOf(account?.password ?: "") }
     var showPassword by remember { mutableStateOf(false) }
 

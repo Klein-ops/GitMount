@@ -29,7 +29,7 @@ data class AccountConfig(
     val mode: String = "WEBDAV",
     val ftpPort: Int = 2121,
     val webdavPort: Int = 8080,
-    val username: String = "gitmount",
+    val username: String = "",
     val password: String = "",
     /**
      * 账户启用开关（账户页 Switch 控制）：
@@ -65,7 +65,7 @@ data class ServerStatus(
     val mode: ServerMode = ServerMode.WEBDAV,
     val host: String? = null,
     val port: Int = 0,
-    val username: String = "gitmount",
+    val username: String = "",
     val password: String = "",
     val rootUrl: String? = null,
 )

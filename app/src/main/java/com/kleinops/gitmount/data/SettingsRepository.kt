@@ -69,7 +69,7 @@ data class AppSettings(
     val mode: String get() = activeAccount?.mode ?: "WEBDAV"
     val ftpPort: Int get() = activeAccount?.ftpPort ?: 2121
     val webdavPort: Int get() = activeAccount?.webdavPort ?: 8080
-    val username: String get() = activeAccount?.username ?: "gitmount"
+    val username: String get() = activeAccount?.username ?: ""
     val password: String get() = activeAccount?.password ?: ""
 }
 
@@ -188,7 +188,7 @@ class SettingsRepository(private val context: Context) {
                     mode = o.optString("mode", "WEBDAV"),
                     ftpPort = o.optInt("ftpPort", 2121),
                     webdavPort = o.optInt("webdavPort", 8080),
-                    username = o.optString("username", "gitmount"),
+                    username = o.optString("username", ""),
                     password = o.optString("password", ""),
                     enabled = !o.has("enabled") || o.optBoolean("enabled", true),
                 )
@@ -214,7 +214,7 @@ class SettingsRepository(private val context: Context) {
             mode = p[Keys.MODE] ?: "WEBDAV",
             ftpPort = p[Keys.FTP_PORT] ?: 2121,
             webdavPort = p[Keys.WEBDAV_PORT] ?: 8080,
-            username = p[Keys.USERNAME] ?: "gitmount",
+            username = p[Keys.USERNAME] ?: "",
             password = p[Keys.PASSWORD] ?: "",
         )
     }
