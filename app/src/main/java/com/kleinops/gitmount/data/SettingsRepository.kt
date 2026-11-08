@@ -12,12 +12,17 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import java.security.KeyStore
+import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
+import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.SecretKeySpec
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 
@@ -437,6 +442,175 @@ class SettingsRepository(private val context: Context) {
      */
     suspend fun setServiceEnabled(enabled: Boolean) {
         context.dataStore.edit { p -> p[Keys.SERVICE_ENABLED] = enabled }
+    }
+
+    // ---------- 备份 / 恢复 ----------
+
+    /**
+     * 备份整个配置（基于解密后的 AppSettings 重建 payload，token 明文入备份，
+     * 恢复时用当前设备 Keystore 重新加密——跨设备迁移可用）。
+     * @param encrypt true = 用口令做 AES-256-GCM 加密；false = 明文 JSON（token 直接可见，慎用）
+     */
+    suspend fun exportBackup(encrypt: Boolean, password: String = ""): String {
+        val s = settings.first()
+        val json = org.json.JSONObject()
+        json.put("app", "GitMount")
+        json.put("type", "config-backup")
+        json.put("createdAt", java.time.Instant.now().toString())
+        json.put("format", if (encrypt) "encrypted" else "plain")
+
+        val cfg = org.json.JSONObject()
+        cfg.put("loopbackOnly", s.loopbackOnly)
+        cfg.put("hideNotification", s.hideNotification)
+        cfg.put("hideFromRecents", s.hideFromRecents)
+        cfg.put("autoStart", s.autoStart)
+        cfg.put("serviceEnabled", s.serviceEnabled)
+        cfg.put("activeMountPointId", s.activeMountPointId)
+        // 共享令牌明文入备份（恢复时用新设备 keystore 重加密）
+        cfg.put("sharedToken", s.sharedToken)
+        val mps = org.json.JSONArray()
+        s.mountPoints.forEach { mp ->
+            mps.put(
+                org.json.JSONObject()
+                    .put("id", mp.id)
+                    .put("name", mp.name)
+                    .put("token", mp.token) // 明文
+                    .put("owner", mp.owner)
+                    .put("repoName", mp.repoName)
+                    .put("branch", mp.branch)
+                    .put("mode", mp.mode)
+                    .put("ftpPort", mp.ftpPort)
+                    .put("webdavPort", mp.webdavPort)
+                    .put("username", mp.username)
+                    .put("password", mp.password)
+                    .put("enabled", mp.enabled)
+                    .put("loopbackOnly", mp.loopbackOnly)
+            )
+        }
+        cfg.put("mountPoints", mps)
+        json.put("payload", cfg)
+
+        val raw = json.toString()
+        return if (encrypt) BackupCrypto.encrypt(raw, password) else raw
+    }
+
+    /**
+     * 从备份恢复配置（覆盖当前全部挂载点与全局设置）。
+     * @param backupJson 备份内容（明文或口令加密）
+     * @param password 解密口令（加密备份必填）
+     * @return 恢复的挂载点数；解析失败抛 IllegalArgumentException
+     */
+    suspend fun importBackup(backupJson: String, password: String = ""): Int {
+        val raw = BackupCrypto.tryDecrypt(backupJson, password)
+            ?: throw IllegalArgumentException("备份解析失败：口令错误或文件已损坏")
+        val json = try {
+            org.json.JSONObject(raw)
+        } catch (e: Exception) {
+            throw IllegalArgumentException("备份不是有效的 JSON 文件")
+        }
+        if (json.optString("app") != "GitMount" || json.optString("type") != "config-backup") {
+            throw IllegalArgumentException("不是 GitMount 配置备份文件")
+        }
+        val cfg = json.optJSONObject("payload") ?: throw IllegalArgumentException("备份内容缺失（payload 为空）")
+
+        // 解析挂载点（token 为明文，写盘时用当前设备 keystore 重新加密）
+        val mps = cfg.optJSONArray("mountPoints") ?: org.json.JSONArray()
+        val mountPoints = (0 until mps.length()).mapNotNull { i ->
+            val o = mps.optJSONObject(i) ?: return@mapNotNull null
+            val id = o.optString("id", "")
+            if (id.isBlank()) return@mapNotNull null
+            MountPointConfig(
+                id = id,
+                name = o.optString("name", "挂载点"),
+                token = o.optString("token", ""),
+                owner = o.optString("owner", ""),
+                repoName = o.optString("repoName", ""),
+                branch = o.optString("branch", "main"),
+                mode = o.optString("mode", "WEBDAV"),
+                ftpPort = o.optInt("ftpPort", 2121),
+                webdavPort = o.optInt("webdavPort", 8080),
+                username = o.optString("username", ""),
+                password = o.optString("password", ""),
+                enabled = o.optBoolean("enabled", true),
+                loopbackOnly = o.optBoolean("loopbackOnly", false),
+            )
+        }
+        val activeId = cfg.optString("activeMountPointId", "")
+            .takeIf { id -> mountPoints.any { it.id == id } }
+            ?: mountPoints.firstOrNull()?.id
+            ?: ""
+
+        context.dataStore.edit { p ->
+            p[Keys.MOUNT_POINTS_JSON] = writeMountPointsJson(mountPoints) // 内部重加密
+            p[Keys.ACTIVE_MOUNT_POINT_ID] = activeId
+            val shared = cfg.optString("sharedToken", "")
+            if (shared.isBlank()) p.remove(Keys.SHARED_TOKEN)
+            else p[Keys.SHARED_TOKEN] = TokenCrypto.encrypt(shared)
+            p[Keys.LOOPBACK_ONLY] = cfg.optBoolean("loopbackOnly", false)
+            p[Keys.HIDE_NOTIFICATION] = cfg.optBoolean("hideNotification", true)
+            p[Keys.HIDE_FROM_RECENTS] = cfg.optBoolean("hideFromRecents", false)
+            p[Keys.AUTO_START] = cfg.optBoolean("autoStart", true)
+            p[Keys.SERVICE_ENABLED] = cfg.optBoolean("serviceEnabled", false)
+        }
+        return mountPoints.size
+    }
+
+    /** 备份口令加密：PBKDF2 派生密钥 + AES-256-GCM，格式 `salt:iv:tag+ciphertext`(Base64) */
+    private object BackupCrypto {
+        private const val ITERATIONS = 100_000
+        private const val KEY_BITS = 256
+        private const val GCM_TAG_BITS = 128
+        private const val TRANSFORMATION = "AES/GCM/NoPadding"
+
+        fun encrypt(plain: String, password: String): String {
+            if (password.isBlank()) throw IllegalArgumentException("加密备份必须设置口令")
+            val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
+            val key = deriveKey(password, salt)
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(Cipher.ENCRYPT_MODE, key)
+            val enc = cipher.doFinal(plain.toByteArray(Charsets.UTF_8))
+            // salt:iv:密文（密文含 GCM tag）
+            return Base64.encodeToString(salt, Base64.NO_WRAP) + ":" +
+                Base64.encodeToString(cipher.iv, Base64.NO_WRAP) + ":" +
+                Base64.encodeToString(enc, Base64.NO_WRAP)
+        }
+
+        fun decrypt(blob: String, password: String): String {
+            if (password.isBlank()) throw IllegalArgumentException("请输入备份口令")
+            val parts = blob.split(":", limit = 3)
+            if (parts.size != 3) throw IllegalArgumentException("备份格式不完整")
+            val salt = Base64.decode(parts[0], Base64.NO_WRAP)
+            val iv = Base64.decode(parts[1], Base64.NO_WRAP)
+            val enc = Base64.decode(parts[2], Base64.NO_WRAP)
+            val key = deriveKey(password, salt)
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
+            return String(cipher.doFinal(enc), Charsets.UTF_8)
+        }
+
+        /** 识别备份格式：明文 JSON 直接透传；加密备份口令错误/损坏时返回 null */
+        fun tryDecrypt(content: String, password: String): String? {
+            // 明文备份是合法 JSON（含冒号，不能用 contains(":") 判断）；先试明文解析
+            val asJson = try {
+                org.json.JSONObject(content)
+                content
+            } catch (_: Exception) {
+                null
+            }
+            if (asJson != null) return asJson
+            // 非明文 JSON：按加密备份尝试口令解密
+            return try {
+                decrypt(content, password)
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        private fun deriveKey(password: String, salt: ByteArray): SecretKey {
+            val spec = PBEKeySpec(password.toCharArray(), salt, ITERATIONS, KEY_BITS)
+            val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+            return SecretKeySpec(factory.generateSecret(spec).encoded, "AES")
+        }
     }
 
     suspend fun clearAll() {

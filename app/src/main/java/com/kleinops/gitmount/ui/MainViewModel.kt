@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** 仓库初始化向导状态 */
 sealed interface SetupState {
@@ -541,6 +542,36 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun clearLogs() = LogBus.clear()
+
+    // ---------- 备份 / 恢复 ----------
+
+    /** 导出备份：生成备份 JSON（可口令加密），内容通过回调返回 */
+    fun exportBackup(encrypt: Boolean, password: String, onResult: (Result<String>) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching { settingsRepo.exportBackup(encrypt, password) }
+            if (result.isSuccess) {
+                LogBus.info("配置备份已生成（${if (encrypt) "已加密" else "明文"}）")
+            } else {
+                LogBus.error("备份失败：${result.exceptionOrNull()?.message}")
+            }
+            // 回调切回主线程（onResult 里会更新 Compose 状态）
+            withContext(Dispatchers.Main) { onResult(result) }
+        }
+    }
+
+    /** 导入备份：解析并恢复配置；失败抛异常信息给 UI 提示 */
+    fun importBackup(content: String, password: String, onResult: (Result<Int>) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching { settingsRepo.importBackup(content, password) }
+            if (result.isSuccess) {
+                LogBus.info("配置已从备份恢复：${result.getOrNull()} 个挂载点")
+            } else {
+                LogBus.error("恢复失败：${result.exceptionOrNull()?.message}")
+            }
+            // 回调切回主线程（onResult 里会更新 Compose 状态）
+            withContext(Dispatchers.Main) { onResult(result) }
+        }
+    }
 
     /**
      * 新建仓库后立即读取默认分支时，GitHub 可能尚未完成初始化（短暂 404）。
