@@ -17,13 +17,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Backup
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledButton
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
@@ -270,7 +273,11 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                         )
                     }
                     Spacer(Modifier.width(8.dp))
-                    TextButton(onClick = { showBackupDialog = true }) { Text("备份") }
+                    FilledTonalButton(onClick = { showBackupDialog = true }) {
+                        Icon(Icons.Filled.Backup, contentDescription = null, modifier = Modifier.width(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("备份")
+                    }
                 }
                 Spacer(Modifier.height(6.dp))
                 Row(
@@ -287,7 +294,11 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                         )
                     }
                     Spacer(Modifier.width(8.dp))
-                    OutlinedButton(onClick = { restoreLauncher.launch(arrayOf("*/*")) }) { Text("恢复") }
+                    FilledTonalButton(onClick = { restoreLauncher.launch(arrayOf("*/*")) }) {
+                        Icon(Icons.Filled.Restore, contentDescription = null, modifier = Modifier.width(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("恢复")
+                    }
                 }
             }
 
@@ -329,12 +340,12 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 }
             },
             confirmButton = {
-                TextButton(
+                FilledButton(
                     onClick = {
                         val password = if (backupEncrypt) backupPassword else ""
                         if (backupEncrypt && password.isBlank()) {
                             toast("请输入备份口令")
-                            return@TextButton
+                            return@FilledButton
                         }
                         showBackupDialog = false
                         vm.exportBackup(backupEncrypt, password) { result ->
@@ -377,12 +388,12 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 }
             },
             confirmButton = {
-                TextButton(
+                FilledButton(
                     onClick = {
-                        val content = pendingRestoreContent ?: return@TextButton
+                        val content = pendingRestoreContent ?: return@FilledButton
                         if (restorePassword.isBlank()) {
                             toast("请输入备份口令")
-                            return@TextButton
+                            return@FilledButton
                         }
                         showRestorePasswordDialog = false
                         pendingRestoreContent = null

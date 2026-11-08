@@ -12,7 +12,6 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -25,6 +24,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
@@ -36,7 +37,6 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -351,7 +351,7 @@ private fun ServerCard(
                     Text("启动服务")
                 }
             } else {
-                OutlinedButton(
+                FilledTonalButton(
                     onClick = { MountService.stop(context) },
                     modifier = Modifier.weight(1f),
                 ) {
@@ -476,24 +476,27 @@ private fun LogCard(vm: MainViewModel) {
             EmptyHint("暂无日志")
         } else {
             val shown = if (expanded) logs.take(30) else logs.take(5)
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { expanded = !expanded },
-            ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
                 shown.forEach { LogRow(it) }
-                Spacer(Modifier.height(6.dp))
-                // 折叠/展开提示：折叠时显示总数与"点击展开"，展开时提示可收起
-                val tailText = if (expanded) {
-                    if (logs.size > 30) "已展开最近 30 条（共 ${logs.size} 条），点击收起" else "点击收起"
-                } else {
-                    if (logs.size > 5) "显示最近 5 条，共 ${logs.size} 条，点击展开" else "点击展开"
+                // 展开/收起统一用全宽 tonal 按钮：大触摸目标 + 图标，折叠/展开状态一眼可辨
+                if (logs.size > 5 || expanded) {
+                    Spacer(Modifier.height(8.dp))
+                    FilledTonalButton(
+                        onClick = { expanded = !expanded },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(
+                            if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                            contentDescription = null,
+                            modifier = Modifier.width(18.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            if (expanded) "收起日志"
+                            else "展开全部日志（共 ${logs.size} 条）"
+                        )
+                    }
                 }
-                Text(
-                    tailText,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
             }
         }
     }

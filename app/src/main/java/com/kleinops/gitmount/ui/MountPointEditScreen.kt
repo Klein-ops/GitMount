@@ -28,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -35,11 +36,11 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
@@ -262,11 +263,15 @@ fun MountPointEditScreen(
                         )
                     }
                     Spacer(Modifier.height(10.dp))
-                    OutlinedButton(
+                    FilledTonalButton(
                         onClick = { showRepoSelect = true },
                         enabled = effectToken.isNotBlank(),
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("选择仓库") }
+                    ) {
+                        Icon(Icons.Filled.FolderOpen, contentDescription = null, modifier = Modifier.width(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("选择仓库")
+                    }
                     if (unbind) {
                         Spacer(Modifier.height(6.dp))
                         TextButton(onClick = { unbind = false }) { Text("取消解绑") }
@@ -337,12 +342,12 @@ fun MountPointEditScreen(
                     Spacer(Modifier.height(10.dp))
                     val busy = repoOpState is RepoOpState.Loading || repoOpState is RepoOpState.ClearingHistory
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
+                        FilledTonalButton(
                             onClick = { showRepoSelect = true },
                             enabled = effectToken.isNotBlank() && !busy,
                             modifier = Modifier.weight(1f),
                         ) { Text("选择仓库") }
-                        OutlinedButton(
+                        FilledTonalButton(
                             onClick = { vm.loadRepoInfo(effectToken, repoOwner, repoName) },
                             enabled = !busy,
                             modifier = Modifier.weight(1f),
@@ -350,10 +355,14 @@ fun MountPointEditScreen(
                     }
                     Spacer(Modifier.height(6.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
+                        FilledTonalButton(
                             onClick = { showClearHistoryConfirm = true },
                             enabled = repoOpState !is RepoOpState.ClearingHistory,
                             modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.filledTonalButtonColors(
+                                containerColor = MaterialTheme.colorScheme.errorContainer,
+                                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                            ),
                         ) {
                             if (repoOpState is RepoOpState.ClearingHistory) {
                                 CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
@@ -363,7 +372,7 @@ fun MountPointEditScreen(
                                 Text("清空提交历史")
                             }
                         }
-                        OutlinedButton(
+                        FilledTonalButton(
                             onClick = {
                                 unbind = true
                                 bindingRepo = null
@@ -549,6 +558,10 @@ fun MountPointEditScreen(
                         showClearHistoryConfirm = false
                         vm.clearRepoHistory(effectToken, repoOwner, repoName, repoBranch)
                     },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
                 ) { Text("确认清空") }
             },
             dismissButton = {
@@ -613,7 +626,7 @@ private fun RepoSelectScreen(
         ) {
             // 扫描 / 新建按钮行
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
+                FilledTonalButton(
                     onClick = { vm.scanRepos(effectToken) },
                     enabled = effectToken.isNotBlank() && scanState !is ScanState.Working,
                     modifier = Modifier.weight(1f),
@@ -626,7 +639,7 @@ private fun RepoSelectScreen(
                         Text("刷新仓库列表")
                     }
                 }
-                OutlinedButton(
+                FilledTonalButton(
                     onClick = { showNewRepo = !showNewRepo },
                     enabled = effectToken.isNotBlank() && scanState !is ScanState.Working,
                     modifier = Modifier.weight(1f),
