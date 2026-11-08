@@ -15,11 +15,11 @@ data class RepoConfig(
 )
 
 /**
- * 单个账户配置（多账户动态激活架构）。
- * 每账户独立持有：GitHub 令牌、绑定仓库、服务协议、端口、局域网访问账号密码。
+ * 单个挂载点配置（多挂载点动态激活架构）。
+ * 每挂载点独立持有：GitHub 令牌、绑定仓库、服务协议、端口、局域网访问账号密码。
  * token 字段存的是 Keystore 加密后的密文（见 TokenCrypto）。
  */
-data class AccountConfig(
+data class MountPointConfig(
     val id: String,
     val name: String,
     val token: String,
@@ -32,9 +32,9 @@ data class AccountConfig(
     val username: String = "",
     val password: String = "",
     /**
-     * 账户启用开关（账户页 Switch 控制）：
-     * false = 该账户被停用，服务启动时跳过它、不监听其端口。
-     * 服务启停是全局操作（主界面「启动/停止服务」），账户是否参与由这里决定。
+     * 挂载点启用开关（挂载点页 Switch 控制）：
+     * false = 该挂载点被停用，服务启动时跳过它、不监听其端口。
+     * 服务启停是全局操作（主界面「启动/停止服务」），挂载点是否参与由这里决定。
      */
     val enabled: Boolean = true,
     /**
@@ -55,12 +55,12 @@ data class AccountConfig(
         get() = if (mode == "FTP") ftpPort else webdavPort
 
     /**
-     * 该账户实际使用的 GitHub 令牌：账户独立令牌为空时回退到全局共享令牌。
+     * 该挂载点实际使用的 GitHub 令牌：挂载点独立令牌为空时回退到全局共享令牌。
      * @param sharedToken 全局共享令牌（见 AppSettings.sharedToken）
      */
     fun effectiveToken(sharedToken: String): String = token.ifBlank { sharedToken }
 
-    /** 账户是否可提供服务：账户已启用、仓库已绑定且生效令牌非空 */
+    /** 挂载点是否可提供服务：挂载点已启用、仓库已绑定且生效令牌非空 */
     fun isUsable(sharedToken: String): Boolean =
         enabled && effectiveToken(sharedToken).isNotBlank() && owner.isNotBlank() && repoName.isNotBlank()
 

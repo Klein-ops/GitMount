@@ -64,7 +64,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.kleinops.gitmount.data.AccountConfig
+import com.kleinops.gitmount.data.MountPointConfig
 import com.kleinops.gitmount.data.RepoBrief
 import com.kleinops.gitmount.data.ServerMode
 import com.kleinops.gitmount.service.LogBus
@@ -73,15 +73,15 @@ import com.kleinops.gitmount.ui.components.InfoRow
 import com.kleinops.gitmount.ui.components.SectionCard
 
 /**
- * 账户配置页（全屏页面，非弹窗）：新建（account=null）与编辑（account!=null）共用。
+ * 挂载点配置页（全屏页面，非弹窗）：新建（mountPoint=null）与编辑（mountPoint!=null）共用。
  * 三大分区：基本信息 / 绑定仓库（列表选择，旧版样式）/ 服务配置。
  * 底部大按钮保存；保存后服务运行中自动重启使新配置生效。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AccountEditScreen(
+fun MountPointEditScreen(
     vm: MainViewModel,
-    account: AccountConfig?, // null = 新建账户
+    mountPoint: MountPointConfig?, // null = 新建挂载点
     onBack: () -> Unit,
     onSaved: () -> Unit,
 ) {
@@ -91,47 +91,47 @@ fun AccountEditScreen(
     val repoOpState by vm.repoOpState.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
-    val isNew = account == null
+    val isNew = mountPoint == null
     val shared = settings.sharedToken
 
     // ---- 基本信息 ----
-    var name by remember(account?.id) { mutableStateOf(account?.name ?: "") }
-    var enabled by remember(account?.id) { mutableStateOf(account?.enabled ?: true) }
-    var token by remember(account?.id) { mutableStateOf(account?.token ?: "") }
+    var name by remember(mountPoint?.id) { mutableStateOf(mountPoint?.name ?: "") }
+    var enabled by remember(mountPoint?.id) { mutableStateOf(mountPoint?.enabled ?: true) }
+    var token by remember(mountPoint?.id) { mutableStateOf(mountPoint?.token ?: "") }
     var showToken by remember { mutableStateOf(false) }
 
     // ---- 服务配置 ----
-    var mode by remember(account?.id) {
+    var mode by remember(mountPoint?.id) {
         mutableStateOf(
-            runCatching { ServerMode.valueOf(account?.mode ?: "WEBDAV") }.getOrDefault(ServerMode.WEBDAV)
+            runCatching { ServerMode.valueOf(mountPoint?.mode ?: "WEBDAV") }.getOrDefault(ServerMode.WEBDAV)
         )
     }
-    var ftpPort by remember(account?.id) { mutableStateOf((account?.ftpPort ?: 2121).toString()) }
-    var webdavPort by remember(account?.id) { mutableStateOf((account?.webdavPort ?: 8080).toString()) }
-    var username by remember(account?.id) { mutableStateOf(account?.username ?: "") }
-    var password by remember(account?.id) { mutableStateOf(account?.password ?: "") }
+    var ftpPort by remember(mountPoint?.id) { mutableStateOf((mountPoint?.ftpPort ?: 2121).toString()) }
+    var webdavPort by remember(mountPoint?.id) { mutableStateOf((mountPoint?.webdavPort ?: 8080).toString()) }
+    var username by remember(mountPoint?.id) { mutableStateOf(mountPoint?.username ?: "") }
+    var password by remember(mountPoint?.id) { mutableStateOf(mountPoint?.password ?: "") }
     var showPassword by remember { mutableStateOf(false) }
     // 仅本机访问（该挂载点单独开关；全局「强制仅本机」由设置页控制，此处不显示）
-    var loopbackOnly by remember(account?.id) { mutableStateOf(account?.loopbackOnly ?: false) }
+    var loopbackOnly by remember(mountPoint?.id) { mutableStateOf(mountPoint?.loopbackOnly ?: false) }
 
     // ---- 仓库绑定（选择放到独立页面，配置页只做展示 + 容量/清空历史）----
-    var bindingRepo by remember(account?.id) { mutableStateOf<RepoBrief?>(null) }
-    var unbind by remember(account?.id) { mutableStateOf(false) }
+    var bindingRepo by remember(mountPoint?.id) { mutableStateOf<RepoBrief?>(null) }
+    var unbind by remember(mountPoint?.id) { mutableStateOf(false) }
     // 独立「选择仓库」页面开关
-    var showRepoSelect by remember(account?.id) { mutableStateOf(false) }
+    var showRepoSelect by remember(mountPoint?.id) { mutableStateOf(false) }
     // 清空提交历史确认对话框
-    var showClearHistoryConfirm by remember(account?.id) { mutableStateOf(false) }
+    var showClearHistoryConfirm by remember(mountPoint?.id) { mutableStateOf(false) }
 
     val effectToken = token.trim().ifBlank { shared }
-    val currentOwner = account?.owner ?: ""
-    val currentRepo = account?.repoName ?: ""
+    val currentOwner = mountPoint?.owner ?: ""
+    val currentRepo = mountPoint?.repoName ?: ""
     val currentBinding = bindingRepo?.let { it.fullName }
         ?: if (currentOwner.isNotBlank() && currentRepo.isNotBlank()) "$currentOwner/$currentRepo" else ""
 
     // 容量/清空历史针对的仓库 = 配置页当前所选（bindingRepo 优先，未选则用挂载点旧绑定）
     val repoOwner = bindingRepo?.fullName?.substringBefore('/') ?: currentOwner
     val repoName = bindingRepo?.fullName?.substringAfter('/') ?: currentRepo
-    val repoBranch = bindingRepo?.defaultBranch ?: (account?.branch ?: "main")
+    val repoBranch = bindingRepo?.defaultBranch ?: (mountPoint?.branch ?: "main")
     val hasRepo = currentBinding.isNotBlank() && !unbind
 
     // 已绑定仓库且令牌有效时自动查询容量（换仓库/换令牌自动重查）
@@ -480,8 +480,8 @@ fun AccountEditScreen(
                 onClick = {
                     val n = name.trim()
                     if (n.isBlank()) return@Button
-                    val base = AccountConfig(
-                        id = account?.id ?: "",
+                    val base = MountPointConfig(
+                        id = mountPoint?.id ?: "",
                         name = n,
                         token = token.trim(),
                         owner = bindingRepo?.fullName?.substringBefore('/')
@@ -489,33 +489,33 @@ fun AccountEditScreen(
                         repoName = bindingRepo?.fullName?.substringAfter('/')
                             ?: if (unbind) "" else currentRepo,
                         branch = bindingRepo?.defaultBranch
-                            ?: if (unbind) "main" else (account?.branch ?: "main"),
+                            ?: if (unbind) "main" else (mountPoint?.branch ?: "main"),
                         mode = mode.name,
-                        ftpPort = ftpPort.toIntOrNull() ?: (account?.ftpPort ?: 2121),
-                        webdavPort = webdavPort.toIntOrNull() ?: (account?.webdavPort ?: 8080),
+                        ftpPort = ftpPort.toIntOrNull() ?: (mountPoint?.ftpPort ?: 2121),
+                        webdavPort = webdavPort.toIntOrNull() ?: (mountPoint?.webdavPort ?: 8080),
                         username = username.trim(),
                         password = password,
                         enabled = enabled,
                         loopbackOnly = loopbackOnly,
                     )
                     if (isNew) {
-                        vm.createAccount(base) {
+                        vm.createMountPoint(base) {
                             LogBus.info("挂载点「$n」已创建")
                             onSaved()
                         }
                     } else {
-                        val serviceChanged = account!!.mode != base.mode ||
-                            account.ftpPort != base.ftpPort ||
-                            account.webdavPort != base.webdavPort ||
-                            account.username != base.username ||
-                            account.password != base.password ||
-                            account.token != base.token ||
-                            account.owner != base.owner ||
-                            account.repoName != base.repoName ||
-                            account.branch != base.branch ||
-                            account.enabled != base.enabled ||
-                            account.loopbackOnly != base.loopbackOnly
-                        vm.updateAccount(base) {
+                        val serviceChanged = mountPoint!!.mode != base.mode ||
+                            mountPoint.ftpPort != base.ftpPort ||
+                            mountPoint.webdavPort != base.webdavPort ||
+                            mountPoint.username != base.username ||
+                            mountPoint.password != base.password ||
+                            mountPoint.token != base.token ||
+                            mountPoint.owner != base.owner ||
+                            mountPoint.repoName != base.repoName ||
+                            mountPoint.branch != base.branch ||
+                            mountPoint.enabled != base.enabled ||
+                            mountPoint.loopbackOnly != base.loopbackOnly
+                        vm.updateMountPoint(base) {
                             if (server.running && !server.starting && serviceChanged) {
                                 LogBus.info("挂载点配置已变更，增量同步该挂载点使新设置生效")
                                 MountService.sync(context, base.id)

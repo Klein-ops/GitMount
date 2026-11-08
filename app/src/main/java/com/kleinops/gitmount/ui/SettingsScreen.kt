@@ -42,8 +42,8 @@ import com.kleinops.gitmount.ui.components.SectionCard
 
 /**
  * 设置页（右上角齿轮）：只放网络与后台类选项。
- * 服务本身的运行参数（协议 / 端口 / 访问账号 / 独立令牌）在「账户」页编辑
- * （主界面「账户」按钮进入，见 AccountListScreen）。
+ * 服务本身的运行参数（协议 / 端口 / 访问账号 / 独立令牌）在「挂载点」页编辑
+ * （主界面「挂载点」按钮进入，见 MountPointListScreen）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

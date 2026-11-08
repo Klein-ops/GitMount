@@ -30,20 +30,20 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - 数据连接支持 PASV/EPSV（客户端主流）与 PORT（主动模式）。
  * - 所有文件操作统一走 GitRepository，与 WebDAV 共享同一套语义。
  *
- * 多账户动态激活：repo 通过 repoProvider 懒获取（AccountManager 缓存），
- * 认证通过前不碰仓库；认证通过后第一次仓库操作才激活账户并缓存到会话。
- * 会话全程占用账户活跃标记（beginOp），大文件传输期间不会被空闲回收误伤。
+ * 多挂载点动态激活：repo 通过 repoProvider 懒获取（MountPointManager 缓存），
+ * 认证通过前不碰仓库；认证通过后第一次仓库操作才激活挂载点并缓存到会话。
+ * 会话全程占用挂载点活跃标记（beginOp），大文件传输期间不会被空闲回收误伤。
  */
 class FtpServer(
     private val port: Int,
-    private val accountId: String,
+    private val mountPointId: String,
     private val repoProvider: () -> GitRepository,
     private val credentials: () -> Pair<String, String>,
     private val logger: (String) -> Unit = {},
     /** 绑定地址；null = 监听所有网卡（局域网），127.0.0.1 = 仅本机 */
     private val bindAddress: String? = null,
 ) {
-    /** 账户仓库（懒获取，缓存在会话级，避免每命令走 provider 的同步锁） */
+    /** 挂载点仓库（懒获取，缓存在会话级，避免每命令走 provider 的同步锁） */
     private var sessionRepo: GitRepository? = null
     private val repo: GitRepository
         get() = sessionRepo ?: repoProvider().also { sessionRepo = it }
@@ -76,13 +76,13 @@ class FtpServer(
                     val socket = ss.accept()
                     pool.execute {
                         ServerController.sessionOpened()
-                        // 会话级活跃占用：连接建立→断开全程占用账户标记，
-                        // 防止长连接/传输期间该账户被空闲回收仓库缓存
-                        AccountManager.beginOp(accountId)
+                        // 会话级活跃占用：连接建立→断开全程占用挂载点标记，
+                        // 防止长连接/传输期间该挂载点被空闲回收仓库缓存
+                        MountPointManager.beginOp(mountPointId)
                         try {
                             FtpSession(socket).run()
                         } finally {
-                            AccountManager.endOp(accountId)
+                            MountPointManager.endOp(mountPointId)
                             ServerController.sessionClosed()
                         }
                     }
@@ -305,8 +305,8 @@ class FtpServer(
             }
             if (anonymous || (pendingUser == user && pass == password)) {
                 authenticated = true
-                // 认证通过：立即激活该账户（建 repo + 连通性探测）。
-                // 失败时提示账户不可用，但保持已认证（仓库操作时再报），
+                // 认证通过：立即激活该挂载点（建 repo + 连通性探测）。
+                // 失败时提示挂载点不可用，但保持已认证（仓库操作时再报），
                 // 避免客户端反复 USER/PASS 重试。
                 try {
                     repoProvider()
@@ -402,12 +402,12 @@ class FtpServer(
 
         /**
          * 打开被动数据监听端口。
-         * 避开所有账户的监听端口（AccountManager.occupiedPorts），防止 FTP
-         * 随机数据端口撞上其他账户的 WebDAV/FTP 监听端口导致连接被劫持。
+         * 避开所有挂载点的监听端口（MountPointManager.occupiedPorts），防止 FTP
+         * 随机数据端口撞上其他挂载点的 WebDAV/FTP 监听端口导致连接被劫持。
          * 最多尝试若干次，仍失败则返回 null 由上层回 425。
          */
         private fun openPassiveSocket(): ServerSocket? {
-            val occupied = AccountManager.occupiedPorts()
+            val occupied = MountPointManager.occupiedPorts()
             repeat(10) {
                 val ps = ServerSocket(0, 1, socket.localAddress)
                 val p = ps.localPort

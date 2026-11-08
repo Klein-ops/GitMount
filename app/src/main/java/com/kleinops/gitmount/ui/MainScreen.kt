@@ -64,7 +64,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.kleinops.gitmount.data.AppSettings
 import com.kleinops.gitmount.data.ServerMode
-import com.kleinops.gitmount.service.AccountManager
+import com.kleinops.gitmount.service.MountPointManager
 import com.kleinops.gitmount.service.MountService
 import com.kleinops.gitmount.service.ServerController
 import com.kleinops.gitmount.ui.components.ClickableInfoRow
@@ -88,10 +88,10 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
     // 服务运行时的会话数、流量统计、日志更新都只重启对应卡片，不会牵动整页重组
 
     var showSettings by remember { mutableStateOf(false) }
-    var showAccountList by remember { mutableStateOf(false) }
+    var showMountPointList by remember { mutableStateOf(false) }
 
     // 进入后台（UI 不可见）时释放可重建的 UI 缓存，回前台自动恢复；
-    // 服务端（FTP/WebDAV 监听、账户 repo 缓存）不受影响。
+    // 服务端（FTP/WebDAV 监听、挂载点 repo 缓存）不受影响。
     val lifecycleOwner = LocalLifecycleOwner.current
     val currentIsConfigured by rememberUpdatedState(settings.isConfigured)
     DisposableEffect(lifecycleOwner) {
@@ -110,7 +110,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
     // 进入二级页从右滑入，返回时从左侧退回，整体淡入淡出
     AnimatedContent(
         targetState = when {
-            showAccountList -> 1
+            showMountPointList -> 1
             showSettings -> 2
             else -> 0
         },
@@ -126,11 +126,11 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
         label = "mainNav",
     ) { page ->
         when (page) {
-            // 挂载点管理页（多账户：新建一步到位 / 编辑完整配置 / 启用开关 / 删除）
+            // 挂载点管理页（多挂载点：新建一步到位 / 编辑完整配置 / 启用开关 / 删除）
             1 -> {
                 // 系统返回键：回到主界面而不是退出应用
-                BackHandler { showAccountList = false }
-                AccountListScreen(vm = vm, onBack = { showAccountList = false })
+                BackHandler { showMountPointList = false }
+                MountPointListScreen(vm = vm, onBack = { showMountPointList = false })
             }
             // 设置页独立成页面（网络与后台类选项），返回后回到主界面
             2 -> {
@@ -194,7 +194,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
         ) {
             item { Spacer(Modifier.height(4.dp)) }
 
-            // 运行状态 + 控制（全局服务：启动/停止作用于全部已启用账户）
+            // 运行状态 + 控制（全局服务：启动/停止作用于全部已启用挂载点）
             // 独立子组合：服务运行时的会话数/流量统计只重组本卡片，不牵动整页
             item {
                 ServerCard(
@@ -202,7 +202,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                     settings = settings,
                     scope = scope,
                     snackbar = snackbar,
-                    onOpenAccounts = { showAccountList = true },
+                    onOpenMountPoints = { showMountPointList = true },
                 )
             }
 
@@ -245,7 +245,7 @@ private fun ServerCard(
     settings: AppSettings,
     scope: CoroutineScope,
     snackbar: SnackbarHostState,
-    onOpenAccounts: () -> Unit,
+    onOpenMountPoints: () -> Unit,
 ) {
     val context = LocalContext.current
     val server by vm.serverState.collectAsStateWithLifecycle()
@@ -267,26 +267,26 @@ private fun ServerCard(
                 cm.setPrimaryClip(ClipData.newPlainText("GitMount 地址", text))
                 scope.launch { snackbar.showSnackbar("$label 已复制到剪贴板") }
             }
-            // 简略展示：全部已启用账户的状态 + 仓库 + 可复制地址（一行一个）。
+            // 简略展示：全部已启用挂载点的状态 + 仓库 + 可复制地址（一行一个）。
             // 每个挂载点地址按各自实际绑定地址展示：仅本机的显示 127.0.0.1，否则显示局域网 IP。
-            val shown = settings.accounts.filter { it.isUsable(settings.sharedToken) }
-            shown.forEachIndexed { idx, acc ->
-                val mode = runCatching { ServerMode.valueOf(acc.mode) }.getOrDefault(ServerMode.WEBDAV)
-                val accLoopback = acc.effectiveLoopback(settings.loopbackOnly)
-                val baseIp = if (accLoopback) "127.0.0.1" else (server.lanIp ?: "127.0.0.1")
-                val addr = if (mode == ServerMode.WEBDAV) "http://$baseIp:${acc.port}/" else "ftp://$baseIp:${acc.port}/"
-                val activeNow = AccountManager.isActive(acc.id)
+            val shown = settings.mountPoints.filter { it.isUsable(settings.sharedToken) }
+            shown.forEachIndexed { idx, mp ->
+                val mode = runCatching { ServerMode.valueOf(mp.mode) }.getOrDefault(ServerMode.WEBDAV)
+                val mpLoopback = mp.effectiveLoopback(settings.loopbackOnly)
+                val baseIp = if (mpLoopback) "127.0.0.1" else (server.lanIp ?: "127.0.0.1")
+                val addr = if (mode == ServerMode.WEBDAV) "http://$baseIp:${mp.port}/" else "ftp://$baseIp:${mp.port}/"
+                val activeNow = MountPointManager.isActive(mp.id)
                 InfoRow(
-                    label = acc.name,
-                    value = "${mode.label}:${acc.port} · ${if (activeNow) "活跃" else "休眠"}",
+                    label = mp.name,
+                    value = "${mode.label}:${mp.port} · ${if (activeNow) "活跃" else "休眠"}",
                     mono = true,
                 )
-                InfoRow("仓库", acc.repoLabel, mono = true)
+                InfoRow("仓库", mp.repoLabel, mono = true)
                 ClickableInfoRow(
                     label = "地址",
                     value = addr,
                     mono = true,
-                    onClick = { copyToClipboard(addr, "${acc.name} 地址") },
+                    onClick = { copyToClipboard(addr, "${mp.name} 地址") },
                 )
                 if (idx < shown.lastIndex) Spacer(Modifier.height(6.dp))
             }
@@ -327,7 +327,7 @@ private fun ServerCard(
         }
 
         Spacer(Modifier.height(16.dp))
-        // 启动 / 停止独占整行，全局作用：一次拉起/停止全部已启用账户的服务
+        // 启动 / 停止独占整行，全局作用：一次拉起/停止全部已启用挂载点的服务
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -337,7 +337,7 @@ private fun ServerCard(
                     onClick = {
                         if (!settings.isConfigured) {
                             scope.launch { snackbar.showSnackbar("请先在「挂载点」页创建挂载点并绑定仓库") }
-                            onOpenAccounts()
+                            onOpenMountPoints()
                         } else {
                             MountService.start(context)
                         }
@@ -360,13 +360,13 @@ private fun ServerCard(
                 }
             }
         }
-        // 第二行：账户（仓库绑定/协议/端口/启用开关都在账户页一步到位）
+        // 第二行：挂载点（仓库绑定/协议/端口/启用开关都在挂载点页一步到位）
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             FilledTonalButton(
-                onClick = onOpenAccounts,
+                onClick = onOpenMountPoints,
                 modifier = Modifier.weight(1f),
             ) {
                 Icon(Icons.Filled.Person, contentDescription = null, modifier = Modifier.width(18.dp))

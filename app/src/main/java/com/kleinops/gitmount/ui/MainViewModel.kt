@@ -142,7 +142,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * 查询仓库容量信息（size 包含提交历史；私有仓库配额 500MB，公开仓库无配额）。
      * 显式参数版：多挂载点架构下由挂载点编辑页传入当前挂载点的生效令牌与仓库；
-     * 无参调用保持旧行为（查当前激活/首个账户绑定仓库）。
+     * 无参调用保持旧行为（查当前激活/首个挂载点绑定仓库）。
      */
     fun loadRepoInfo(
         token: String = settings.value.token,
@@ -194,7 +194,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * 清空提交历史（孤儿提交重写：文件全部保留，历史从 N 个 commit 变成 1 个）。
      * 容量数字由 GitHub 后台 GC 延迟回收，不会立即下降。
      * 显式参数版：多挂载点架构下由挂载点编辑页传入当前挂载点的生效令牌与仓库；
-     * 无参调用保持旧行为（对当前激活/首个账户绑定仓库操作）。
+     * 无参调用保持旧行为（对当前激活/首个挂载点绑定仓库操作）。
      */
     fun clearRepoHistory(
         token: String = settings.value.token,
@@ -225,11 +225,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 绑定已有仓库到指定账户（仓库必须已存在，走一套统一的保存逻辑）。
+     * 绑定已有仓库到指定挂载点（仓库必须已存在，走一套统一的保存逻辑）。
      * @param token 用户输入的令牌（尚未保存时也能直接用）
-     * @param targetAccountId 目标账户 id；null = 旧行为（激活账户/默认账户）
+     * @param targetMountPointId 目标挂载点 id；null = 旧行为（激活挂载点/默认挂载点）
      */
-    fun bindRepo(token: String, owner: String, repoName: String, branch: String = "", targetAccountId: String? = null) {
+    fun bindRepo(token: String, owner: String, repoName: String, branch: String = "", targetMountPointId: String? = null) {
         val t = token.trim()
         val o = owner.trim()
         val r = repoName.trim()
@@ -249,7 +249,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     val b = GitHubClient(t).getDefaultBranch(o, r)
                     b ?: throw GitHubApiException(404, "仓库 $o/$r 不存在或无权访问")
                 }
-                settingsRepo.saveRepo(t, o, r, actualBranch, targetAccountId)
+                settingsRepo.saveRepo(t, o, r, actualBranch, targetMountPointId)
                 LogBus.info("已绑定仓库 $o/$r（$actualBranch）")
                 _setupState.value = SetupState.Success("已绑定：$o/$r（$actualBranch）")
             } catch (e: Exception) {
@@ -261,12 +261,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 新建仓库并立即绑定到指定账户（创建完成后走与绑定完全相同的保存逻辑）。
+     * 新建仓库并立即绑定到指定挂载点（创建完成后走与绑定完全相同的保存逻辑）。
      * @param token 用户输入的令牌（尚未保存时也能直接用）
      * @param isPrivate true = 私有，false = 公开
-     * @param targetAccountId 目标账户 id；null = 旧行为（激活账户/默认账户）
+     * @param targetMountPointId 目标挂载点 id；null = 旧行为（激活挂载点/默认挂载点）
      */
-    fun createAndBindRepo(token: String, name: String, isPrivate: Boolean, targetAccountId: String? = null) {
+    fun createAndBindRepo(token: String, name: String, isPrivate: Boolean, targetMountPointId: String? = null) {
         val t = token.trim()
         val repoName = name.trim()
         if (t.isBlank()) {
@@ -288,7 +288,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 LogBus.info("仓库创建成功，读取默认分支…")
                 // 新建仓库后 GitHub 可能短暂 404（auto_init 尚未完成），重试几次
                 val resolvedBranch = awaitDefaultBranch(client, login, repoName) ?: "main"
-                settingsRepo.saveRepo(t, login, repoName, resolvedBranch, targetAccountId)
+                settingsRepo.saveRepo(t, login, repoName, resolvedBranch, targetMountPointId)
                 // 创建后立刻刷新列表，让新仓库出现在仓库列表里
                 runCatching { client.listUserRepos() }.getOrNull()?.let { repos ->
                     scanCache = ScanCache(t, login, repos, System.currentTimeMillis())
@@ -306,9 +306,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 仅创建仓库并刷新扫描列表（不绑定账户）。
-     * 用于账户创建对话框内的"新建仓库"：创建成功后刷新列表并自动选中新仓库，
-     * 随后随账户一起落盘，实现"创建账户一步到位"。
+     * 仅创建仓库并刷新扫描列表（不绑定挂载点）。
+     * 用于挂载点创建对话框内的"新建仓库"：创建成功后刷新列表并自动选中新仓库，
+     * 随后随挂载点一起落盘，实现"创建挂载点一步到位"。
      */
     fun createRepoOnly(token: String, name: String, isPrivate: Boolean, onResult: (RepoBrief?) -> Unit = {}) {
         val t = token.trim()
@@ -424,34 +424,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _setupState.value = SetupState.Idle
     }
 
-    // ---------- 多账户管理 ----------
+    // ---------- 多挂载点管理 ----------
 
     /**
-     * 新建账户（一步到位：完整配置一次落盘，无需再切到其他页挨个设置）。
-     * 账户名 / 独立令牌（留空继承共享）/ 仓库绑定 / 协议 / 端口 / 访问账号一次填完。
+     * 新建挂载点（一步到位：完整配置一次落盘，无需再切到其他页挨个设置）。
+     * 挂载点名 / 独立令牌（留空继承共享）/ 仓库绑定 / 协议 / 端口 / 访问账号一次填完。
      */
-    fun createAccount(
-        account: com.kleinops.gitmount.data.AccountConfig,
+    fun createMountPoint(
+        mountPoint: com.kleinops.gitmount.data.MountPointConfig,
         onSaved: () -> Unit = {},
     ) {
         viewModelScope.launch {
-            settingsRepo.saveAccount(
-                account.copy(id = account.id.ifBlank { "acc_" + java.util.UUID.randomUUID().toString().take(8) }),
+            settingsRepo.saveMountPoint(
+                mountPoint.copy(id = mountPoint.id.ifBlank { "mp_" + java.util.UUID.randomUUID().toString().take(8) }),
                 activate = false,
             )
-            LogBus.info("已新建挂载点「${account.name}」")
+            LogBus.info("已新建挂载点「${mountPoint.name}」")
             onSaved()
         }
     }
 
-    /** 切换账户启用开关（账户页 Switch）——停用后服务重启即跳过该账户 */
-    fun setAccountEnabled(accountId: String, enabled: Boolean, onSaved: () -> Unit = {}) {
+    /** 切换挂载点启用开关（挂载点页 Switch）——停用后服务重启即跳过该挂载点 */
+    fun setMountPointEnabled(mountPointId: String, enabled: Boolean, onSaved: () -> Unit = {}) {
         viewModelScope.launch {
-            val accounts = settings.value.accounts
-            accounts.find { it.id == accountId }?.let { acc ->
-                settingsRepo.saveAccount(acc.copy(enabled = enabled), activate = false)
+            val mountPoints = settings.value.mountPoints
+            mountPoints.find { it.id == mountPointId }?.let { mp ->
+                settingsRepo.saveMountPoint(mp.copy(enabled = enabled), activate = false)
                 LogBus.info(
-                    if (enabled) "挂载点「${acc.name}」已启用" else "挂载点「${acc.name}」已停用（重启服务后不再监听其端口）"
+                    if (enabled) "挂载点「${mp.name}」已启用" else "挂载点「${mp.name}」已停用（重启服务后不再监听其端口）"
                 )
                 onSaved()
             }
@@ -459,52 +459,52 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 切换挂载点的"仅本机访问"开关（账户页卡片 Switch）。
+     * 切换挂载点的"仅本机访问"开关（挂载点页卡片 Switch）。
      * 全局「强制仅本机访问」开启时此开关被禁用（一律仅本机）；
      * 全局关闭时按本开关（该挂载点是否只监听 127.0.0.1）生效。
      */
-    fun setAccountLoopback(accountId: String, loopback: Boolean, onSaved: () -> Unit = {}) {
+    fun setMountPointLoopback(mountPointId: String, loopback: Boolean, onSaved: () -> Unit = {}) {
         viewModelScope.launch {
-            val accounts = settings.value.accounts
-            accounts.find { it.id == accountId }?.let { acc ->
-                settingsRepo.saveAccount(acc.copy(loopbackOnly = loopback), activate = false)
+            val mountPoints = settings.value.mountPoints
+            mountPoints.find { it.id == mountPointId }?.let { mp ->
+                settingsRepo.saveMountPoint(mp.copy(loopbackOnly = loopback), activate = false)
                 LogBus.info(
-                    "挂载点「${acc.name}」${if (loopback) "已设为仅本机访问" else "已允许局域网访问"}"
+                    "挂载点「${mp.name}」${if (loopback) "已设为仅本机访问" else "已允许局域网访问"}"
                 )
                 onSaved()
             }
         }
     }
 
-    /** 重命名账户 */
-    fun renameAccount(id: String, name: String) {
+    /** 重命名挂载点 */
+    fun renameMountPoint(id: String, name: String) {
         val n = name.trim().ifBlank { return }
         viewModelScope.launch {
-            val accounts = settings.value.accounts
-            accounts.find { it.id == id }?.let { acc ->
-                settingsRepo.saveAccount(acc.copy(name = n), activate = false)
+            val mountPoints = settings.value.mountPoints
+            mountPoints.find { it.id == id }?.let { mp ->
+                settingsRepo.saveMountPoint(mp.copy(name = n), activate = false)
                 LogBus.info("挂载点已重命名为「$n」")
             }
         }
     }
 
     /**
-     * 保存账户的完整配置（名称 / 协议 / 端口 / 访问账号 / 独立令牌 / 仓库绑定）。
-     * 账户页直接编辑，无需先"切换激活账户"再去其他页面改。
+     * 保存挂载点的完整配置（名称 / 协议 / 端口 / 访问账号 / 独立令牌 / 仓库绑定）。
+     * 挂载点页直接编辑，无需先"切换激活挂载点"再去其他页面改。
      * @param onSaved 落盘完成后回调（UI 据此决定是否重启服务 / 返回）
      */
-    fun updateAccount(
-        account: com.kleinops.gitmount.data.AccountConfig,
+    fun updateMountPoint(
+        mountPoint: com.kleinops.gitmount.data.MountPointConfig,
         onSaved: () -> Unit = {},
     ) {
         viewModelScope.launch {
-            settingsRepo.saveAccount(account, activate = false)
-            LogBus.info("挂载点「${account.name}」配置已保存")
+            settingsRepo.saveMountPoint(mountPoint, activate = false)
+            LogBus.info("挂载点「${mountPoint.name}」配置已保存")
             onSaved()
         }
     }
 
-    /** 保存全局共享 GitHub 令牌（所有账户默认共用；账户独立令牌留空即继承） */
+    /** 保存全局共享 GitHub 令牌（所有挂载点默认共用；挂载点独立令牌留空即继承） */
     fun saveSharedToken(token: String, onSaved: () -> Unit = {}) {
         viewModelScope.launch {
             settingsRepo.saveSharedToken(token.trim())
@@ -513,10 +513,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 删除账户（若删的是激活账户，激活回退到剩余第一个） */
-    fun deleteAccount(id: String, onSaved: () -> Unit = {}) {
+    /** 删除挂载点（若删的是激活挂载点，激活回退到剩余第一个） */
+    fun deleteMountPoint(id: String, onSaved: () -> Unit = {}) {
         viewModelScope.launch {
-            settingsRepo.deleteAccount(id)
+            settingsRepo.deleteMountPoint(id)
             LogBus.info("已删除挂载点")
             onSaved()
         }

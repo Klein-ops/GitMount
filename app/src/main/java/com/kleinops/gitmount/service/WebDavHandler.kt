@@ -20,23 +20,23 @@ import java.util.UUID
  * - MOVE / COPY（读-写-删）
  * - LOCK / UNLOCK（乐观响应，保证 Windows 资源管理器等客户端可用）
  *
- * 认证：HTTP Basic（用户名/密码在账户配置里；两者都留空 = 匿名模式，放行）。
+ * 认证：HTTP Basic（用户名/密码在挂载点配置里；两者都留空 = 匿名模式，放行）。
  *
- * 多账户动态激活：repo 通过 repoProvider 懒获取（AccountManager 缓存），
- * 认证前不触发 GitHub 请求；认证通过后的第一个仓库操作才激活账户。
+ * 多挂载点动态激活：repo 通过 repoProvider 懒获取（MountPointManager 缓存），
+ * 认证前不触发 GitHub 请求；认证通过后的第一个仓库操作才激活挂载点。
  */
 class WebDavHandler(
-    private val accountId: String,
+    private val mountPointId: String,
     private val repoProvider: () -> GitRepository,
     private val authUser: () -> Pair<String, String>,
 ) {
-    /** repo 改为按需获取：绑定账户激活（缓存在 AccountManager） */
+    /** repo 改为按需获取：绑定挂载点激活（缓存在 MountPointManager） */
     private val repo: GitRepository get() = repoProvider()
 
     fun handle(exchange: HttpExchange) {
         if (!checkAuth(exchange)) return
-        // 认证通过：刷新该账户活跃时间（防止"登录后挂着不动"被空闲回收误伤）
-        AccountManager.touch(accountId)
+        // 认证通过：刷新该挂载点活跃时间（防止"登录后挂着不动"被空闲回收误伤）
+        MountPointManager.touch(mountPointId)
 
         when (exchange.method) {
             "OPTIONS" -> handleOptions(exchange)

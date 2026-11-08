@@ -55,34 +55,34 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.kleinops.gitmount.data.AccountConfig
-import com.kleinops.gitmount.service.AccountManager
+import com.kleinops.gitmount.data.MountPointConfig
+import com.kleinops.gitmount.service.MountPointManager
 import com.kleinops.gitmount.service.LogBus
 import com.kleinops.gitmount.service.MountService
 import com.kleinops.gitmount.ui.components.SectionCard
 
 /**
- * 账户列表页：共享令牌 + 账户列表。
- * 新建 / 编辑账户进入全屏 [AccountEditScreen]，本页不再用弹窗堆配置。
+ * 挂载点列表页：共享令牌 + 挂载点列表。
+ * 新建 / 编辑挂载点进入全屏 [MountPointEditScreen]，本页不再用弹窗堆配置。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
+fun MountPointListScreen(vm: MainViewModel, onBack: () -> Unit) {
     val settings by vm.settings.collectAsStateWithLifecycle()
     val server by vm.serverState.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
-    val accounts = settings.accounts
+    val mountPoints = settings.mountPoints
 
     var sharedToken by remember(settings.sharedToken) { mutableStateOf(settings.sharedToken) }
     var showSharedToken by remember { mutableStateOf(false) }
 
     // 页面导航：新建 / 编辑走向全屏配置页，用 AnimatedContent 做进出手势动效
     var creating by remember { mutableStateOf(false) }
-    var editTarget by remember { mutableStateOf<AccountConfig?>(null) }
-    var deleteTarget by remember { mutableStateOf<AccountConfig?>(null) }
+    var editTarget by remember { mutableStateOf<MountPointConfig?>(null) }
+    var deleteTarget by remember { mutableStateOf<MountPointConfig?>(null) }
 
-    // 页面层级：0=账户列表，1=新建挂载点，2=编辑挂载点
+    // 页面层级：0=挂载点列表，1=新建挂载点，2=编辑挂载点
     // 用 targetState > initialState 判断前进/后退：前进右侧滑入，后退左侧退回
     AnimatedContent(
         targetState = when {
@@ -102,23 +102,23 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
         label = "accountListNav",
     ) { page ->
         when (page) {
-            1 -> AccountEditScreen(
+            1 -> MountPointEditScreen(
                 vm = vm,
-                account = null,
+                mountPoint = null,
                 onBack = { creating = false },
                 onSaved = { creating = false },
             )
-            2 -> editTarget?.let { acc ->
-                AccountEditScreen(
+            2 -> editTarget?.let { mp ->
+                MountPointEditScreen(
                     vm = vm,
-                    account = acc,
+                    mountPoint = mp,
                     onBack = { editTarget = null },
                     onSaved = { editTarget = null },
                 )
             }
-            else -> AccountListContent(
+            else -> MountPointListContent(
                 vm = vm,
-                accounts = accounts,
+                mountPoints = mountPoints,
                 sharedToken = sharedToken,
                 showSharedToken = showSharedToken,
                 onSharedTokenChange = { sharedToken = it },
@@ -132,17 +132,17 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
         }
     }
 
-    // 删除账户确认
-    deleteTarget?.let { acc ->
+    // 删除挂载点确认
+    deleteTarget?.let { mp ->
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
             title = { Text("删除挂载点？") },
-            text = { Text("将删除挂载点「${acc.name}」及其仓库绑定、端口与访问账号配置。此操作不可撤销。") },
+            text = { Text("将删除挂载点「${mp.name}」及其仓库绑定、端口与访问账号配置。此操作不可撤销。") },
             confirmButton = {
                 Button(onClick = {
-                    val id = acc.id
-                    vm.deleteAccount(id) {
-                        // 删除挂载点后同步服务：释放该账户监听与端口，避免删了还占着
+                    val id = mp.id
+                    vm.deleteMountPoint(id) {
+                        // 删除挂载点后同步服务：释放该挂载点监听与端口，避免删了还占着
                         if (server.running && !server.starting) MountService.sync(context, id)
                     }
                     deleteTarget = null
@@ -155,33 +155,33 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
     }
 }
 
-/** 账户列表页主体内容（与原 AccountListScreen 的主 Scaffold 一致，抽出以便 AnimatedContent 切换） */
+/** 挂载点列表页主体内容（与原 MountPointListScreen 的主 Scaffold 一致，抽出以便 AnimatedContent 切换） */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AccountListContent(
+private fun MountPointListContent(
     vm: MainViewModel,
-    accounts: List<AccountConfig>,
+    mountPoints: List<MountPointConfig>,
     sharedToken: String,
     showSharedToken: Boolean,
     onSharedTokenChange: (String) -> Unit,
     onToggleSharedToken: () -> Unit,
     onBack: () -> Unit,
     onCreate: () -> Unit,
-    onEdit: (AccountConfig) -> Unit,
-    onDelete: (AccountConfig) -> Unit,
+    onEdit: (MountPointConfig) -> Unit,
+    onDelete: (MountPointConfig) -> Unit,
     /** true = 全局「强制仅本机访问」开启，各挂载点单独开关被禁用（一律仅本机） */
     forceLoopback: Boolean,
 ) {
     val server by vm.serverState.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
-    // 账户开关切换：落盘后若服务在运行，增量同步该挂载点（只启停这一个，
+    // 挂载点开关切换：落盘后若服务在运行，增量同步该挂载点（只启停这一个，
     // 不再全量重启整个服务——避免打断其他挂载点的连接/传输、清空其缓存）
-    fun onToggle(acc: AccountConfig, enabled: Boolean) {
-        vm.setAccountEnabled(acc.id, enabled) {
+    fun onToggle(mp: MountPointConfig, enabled: Boolean) {
+        vm.setMountPointEnabled(mp.id, enabled) {
             if (server.running && !server.starting) {
                 LogBus.info("挂载点开关已变更，增量同步该挂载点使其生效")
-                MountService.sync(context, acc.id)
+                MountService.sync(context, mp.id)
             }
         }
     }
@@ -251,9 +251,9 @@ private fun AccountListContent(
                 ) { Text("保存共享令牌") }
             }
 
-            // ---- 账户列表 ----
+            // ---- 挂载点列表 ----
             SectionCard(title = "挂载点列表") {
-                if (accounts.isEmpty()) {
+                if (mountPoints.isEmpty()) {
                     Text(
                         "还没有挂载点。点右上角 + 新建。",
                         style = MaterialTheme.typography.bodyMedium,
@@ -261,23 +261,23 @@ private fun AccountListContent(
                     )
                 } else {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        accounts.forEach { acc ->
-                            AccountRow(
-                                account = acc,
-                                enabled = acc.enabled,
-                                activeNow = AccountManager.isActive(acc.id),
+                        mountPoints.forEach { mp ->
+                            MountPointRow(
+                                mountPoint = mp,
+                                enabled = mp.enabled,
+                                activeNow = MountPointManager.isActive(mp.id),
                                 forceLoopback = forceLoopback,
-                                onToggle = { onToggle(acc, it) },
+                                onToggle = { onToggle(mp, it) },
                                 onToggleLoopback = { lo ->
-                                    vm.setAccountLoopback(acc.id, lo) {
+                                    vm.setMountPointLoopback(mp.id, lo) {
                                         if (server.running && !server.starting) {
                                             LogBus.info("挂载点仅本机设置已变更，增量同步该挂载点使其生效")
-                                            MountService.sync(context, acc.id)
+                                            MountService.sync(context, mp.id)
                                         }
                                     }
                                 },
-                                onClick = { onEdit(acc) },
-                                onDelete = { onDelete(acc) },
+                                onClick = { onEdit(mp) },
+                                onDelete = { onDelete(mp) },
                             )
                         }
                     }
@@ -307,8 +307,8 @@ private fun AccountListContent(
 }
 
 @Composable
-private fun AccountRow(
-    account: AccountConfig,
+private fun MountPointRow(
+    mountPoint: MountPointConfig,
     enabled: Boolean,
     activeNow: Boolean,
     /** true = 全局「强制仅本机访问」开启，单独的仅本机开关被禁用（一律仅本机） */
@@ -336,7 +336,7 @@ private fun AccountRow(
                 Column(modifier = Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            account.name,
+                            mountPoint.name,
                             style = MaterialTheme.typography.titleSmall,
                             color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
                         )
@@ -356,14 +356,14 @@ private fun AccountRow(
                         )
                     }
                     Text(
-                        "${account.repoLabel} ｜ ${account.mode} : ${account.port}",
+                        "${mountPoint.repoLabel} ｜ ${mountPoint.mode} : ${mountPoint.port}",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                     // 仅本机提示：全局强制或本挂载点单独开启时显示
-                    if (forceLoopback || account.loopbackOnly) {
+                    if (forceLoopback || mountPoint.loopbackOnly) {
                         Text(
                             if (forceLoopback) "仅本机访问（全局强制）" else "仅本机访问",
                             style = MaterialTheme.typography.labelSmall,
@@ -403,7 +403,7 @@ private fun AccountRow(
                 }
                 Spacer(Modifier.width(8.dp))
                 Switch(
-                    checked = forceLoopback || account.loopbackOnly,
+                    checked = forceLoopback || mountPoint.loopbackOnly,
                     onCheckedChange = onToggleLoopback,
                     enabled = !forceLoopback,
                 )

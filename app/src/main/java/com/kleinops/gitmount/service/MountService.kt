@@ -50,7 +50,7 @@ class MountService : Service() {
         const val ACTION_STOP = "com.kleinops.gitmount.action.STOP"
         const val ACTION_RESTART = "com.kleinops.gitmount.action.RESTART"
         const val ACTION_SYNC = "com.kleinops.gitmount.action.SYNC"
-        const val EXTRA_ACCOUNT_ID = "com.kleinops.gitmount.extra.ACCOUNT_ID"
+        const val EXTRA_MOUNT_POINT_ID = "com.kleinops.gitmount.extra.MOUNT_POINT_ID"
 
         /**
          * 启动流程整体超时：从设置读取 → 端口预检 → GitHub 连通性校验 → 拉起服务器，
@@ -71,7 +71,7 @@ class MountService : Service() {
          */
         private const val RECLAIM_INTERVAL_MS = 10 * 60 * 1000L
 
-        /** 由 UI 调用：启动服务（多账户架构下启动全部账户的监听；mode/port 仅保留兼容） */
+        /** 由 UI 调用：启动服务（多挂载点架构下启动全部挂载点的监听；mode/port 仅保留兼容） */
         fun start(context: Context, mode: ServerMode = ServerMode.WEBDAV, port: Int = 0) {
             // 记录用户意图：期望服务保持运行（进程被杀后据此自动恢复）
             persistIntent(context, enabled = true)
@@ -109,14 +109,14 @@ class MountService : Service() {
         }
 
         /**
-         * 由 UI 调用：按最新保存的配置增量同步单个挂载点（只启停该账户的监听，
-         * 不动其他账户的 socket / 缓存 / 会话 / 统计）。多个挂载点先后变更时
+         * 由 UI 调用：按最新保存的配置增量同步单个挂载点（只启停该挂载点的监听，
+         * 不动其他挂载点的 socket / 缓存 / 会话 / 统计）。多个挂载点先后变更时
          * 各发一次，服务端逐个处理，互不干扰。
          */
-        fun sync(context: Context, accountId: String) {
+        fun sync(context: Context, mountPointId: String) {
             val intent = Intent(context, MountService::class.java).apply {
                 action = ACTION_SYNC
-                putExtra(EXTRA_ACCOUNT_ID, accountId)
+                putExtra(EXTRA_MOUNT_POINT_ID, mountPointId)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -162,7 +162,7 @@ class MountService : Service() {
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    /** 每个账户一个服务器实例：accountId -> HttpServer / FtpServer（空壳监听，认证后才激活仓库）。
+    /** 每个挂载点一个服务器实例：mountPointId -> HttpServer / FtpServer（空壳监听，认证后才激活仓库）。
      *  用 ConcurrentHashMap：增量同步（IO 线程）与全量启停（主线程 / IO 线程）可能并发访问，
      *  普通 HashMap 的 put/remove 在并发下会破坏结构抛 ConcurrentModificationException。 */
     private val httpServers = java.util.concurrent.ConcurrentHashMap<String, HttpServer>()
@@ -249,7 +249,7 @@ class MountService : Service() {
         if (newIp == oldIp) return // IP 未变：完全静默，不刷新不记日志
         LogBus.info("网络状态变化，IP: ${oldIp ?: "无"} → ${newIp ?: "无"}")
         ServerController.update { it.copy(lanIp = newIp) }
-        // 通知地址取"第一个可用账户"，其可能是仅本机（地址应为 127.0.0.1），
+        // 通知地址取"第一个可用挂载点"，其可能是仅本机（地址应为 127.0.0.1），
         // 统一按最新设置刷新主展示信息与通知，避免用旧状态显示错误地址。
         scope.launch {
             val settings = withTimeoutOrNull(SETTINGS_READ_TIMEOUT_MS) {
@@ -281,20 +281,20 @@ class MountService : Service() {
                 return START_STICKY
             }
             ACTION_SYNC -> {
-                // 单个挂载点增量同步：只启停该账户，不动其他账户的监听/缓存/会话。
+                // 单个挂载点增量同步：只启停该挂载点，不动其他挂载点的监听/缓存/会话。
                 // 相比全量重启，不掐断其他挂载点的进行中传输、不清空其仓库缓存、
                 // 不重置累计流量统计——开关单个挂载点不应影响其余挂载点。
-                val accountId = intent.getStringExtra(EXTRA_ACCOUNT_ID)
-                if (accountId.isNullOrBlank()) {
-                    LogBus.warn("收到同步指令但缺少 accountId，忽略")
+                val mountPointId = intent.getStringExtra(EXTRA_MOUNT_POINT_ID)
+                if (mountPointId.isNullOrBlank()) {
+                    LogBus.warn("收到同步指令但缺少 mountPointId，忽略")
                     return START_STICKY
                 }
-                LogBus.info("收到挂载点增量同步指令：$accountId")
-                syncSingleAccount(accountId)
+                LogBus.info("收到挂载点增量同步指令：$mountPointId")
+                syncSingleMountPoint(mountPointId)
                 return START_STICKY
             }
             ACTION_START -> {
-                // 多账户动态激活：启动全部账户的监听（空壳，认证后才激活仓库）
+                // 多挂载点动态激活：启动全部挂载点的监听（空壳，认证后才激活仓库）
                 startServers()
             }
             else -> {
@@ -339,28 +339,28 @@ class MountService : Service() {
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         if (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
-            AccountManager.reclaimIdle()
+            MountPointManager.reclaimIdle()
             LogBus.info("系统内存压力回调（level=$level），已回收空闲挂载点缓存")
         }
     }
 
     /**
-     * 单账户增量同步：按该账户最新保存的配置，只增删这一个挂载点的监听。
+     * 单挂载点增量同步：按该挂载点最新保存的配置，只增删这一个挂载点的监听。
      *
      * 与全量重启的本质区别：
-     * - 只停/起目标账户的 socket，其他账户的监听、进行中传输、仓库缓存、
+     * - 只停/起目标挂载点的 socket，其他挂载点的监听、进行中传输、仓库缓存、
      *   累计流量统计全部保持不动；
      * - 停监听只关 ServerSocket（不再掐线程池、不清缓存、不 release 仓库）；
      * - 同步走协程（IO 线程），不阻塞主线程，开关不产生明显卡顿。
      *
-     * 配置读取失败 / 账户已不存在时静默清理该账户的监听与残留状态
+     * 配置读取失败 / 挂载点已不存在时静默清理该挂载点的监听与残留状态
      * （删除挂载点后也会走到这里，把端口释放掉）。
      */
-    private fun syncSingleAccount(accountId: String) {
+    private fun syncSingleMountPoint(mountPointId: String) {
         // 正常情况下服务应已在运行（UI 只在 running 时发同步）；若不在运行，
-        // 说明用户刚停过服务，这里不重复拉起，直接清理该账户残留状态即可。
+        // 说明用户刚停过服务，这里不重复拉起，直接清理该挂载点残留状态即可。
         if (!ServerController.state.value.running) {
-            LogBus.info("服务未在运行，跳过挂载点增量同步（$accountId）")
+            LogBus.info("服务未在运行，跳过挂载点增量同步（$mountPointId）")
             return
         }
         scope.launch {
@@ -369,50 +369,50 @@ class MountService : Service() {
                     runCatching { settingsRepo.settings.first() }.getOrNull()
                 }
                 if (settings == null) {
-                    LogBus.warn("挂载点增量同步（$accountId）中止：读取配置超时")
+                    LogBus.warn("挂载点增量同步（$mountPointId）中止：读取配置超时")
                     return@launch
                 }
-                val account = settings.accounts.firstOrNull { it.id == accountId }
-                val usable = account != null && account.isUsable(settings.sharedToken)
+                val mountPoint = settings.mountPoints.firstOrNull { it.id == mountPointId }
+                val usable = mountPoint != null && mountPoint.isUsable(settings.sharedToken)
 
-                if (account == null) {
-                    // 账户已被删除：释放监听与缓存，端口归还
-                    LogBus.info("挂载点 $accountId 已删除，清理其监听与缓存")
-                    stopSingleServer(accountId)
-                    AccountManager.release(accountId)
+                if (mountPoint == null) {
+                    // 挂载点已被删除：释放监听与缓存，端口归还
+                    LogBus.info("挂载点 $mountPointId 已删除，清理其监听与缓存")
+                    stopSingleServer(mountPointId)
+                    MountPointManager.release(mountPointId)
                 } else if (!usable) {
-                    // 账户仍在但不可用（停用/未配置完整）：停监听即可，缓存可留待空闲回收
-                    LogBus.info("挂载点「${account.name}」不可用（停用或配置不完整），停止其监听（$accountId）")
-                    stopSingleServer(accountId)
+                    // 挂载点仍在但不可用（停用/未配置完整）：停监听即可，缓存可留待空闲回收
+                    LogBus.info("挂载点「${mountPoint.name}」不可用（停用或配置不完整），停止其监听（$mountPointId）")
+                    stopSingleServer(mountPointId)
                 } else {
-                    // 账户可用：先停旧的（若有），再按最新配置起监听
-                    stopSingleServer(accountId)
-                    startSingleServer(account, settings.sharedToken, settings.loopbackOnly)
+                    // 挂载点可用：先停旧的（若有），再按最新配置起监听
+                    stopSingleServer(mountPointId)
+                    startSingleServer(mountPoint, settings.sharedToken, settings.loopbackOnly)
                 }
 
-                // 收尾：开关/删除可能改变了"第一个可用账户"（通知与主界面主展示），
+                // 收尾：开关/删除可能改变了"第一个可用挂载点"（通知与主界面主展示），
                 // 无论上述哪种结果都刷新一次，保证地址端口与最新配置一致
                 refreshPrimaryInfo(settings)
             } catch (e: Exception) {
                 // 增量同步失败收敛成日志，不让未捕获异常崩掉应用
-                LogBus.error("挂载点增量同步失败（$accountId）：${e.message}")
+                LogBus.error("挂载点增量同步失败（$mountPointId）：${e.message}")
             }
         }
     }
 
     /**
-     * 刷新通知与 ServerController 的"主展示账户"信息（第一个可用账户）。
-     * 增量同步只动了单个挂载点，但若它恰好是第一个可用账户（改端口/停用/删除），
+     * 刷新通知与 ServerController 的"主展示挂载点"信息（第一个可用挂载点）。
+     * 增量同步只动了单个挂载点，但若它恰好是第一个可用挂载点（改端口/停用/删除），
      * 通知与主界面的地址端口会变化，这里统一按最新配置刷新。
      * 不动 running / lanIp / 会话 / 流量统计——这些与单挂载点变更无关。
      */
     private fun refreshPrimaryInfo(settings: com.kleinops.gitmount.data.AppSettings) {
-        val accounts = settings.accounts.filter { it.isUsable(settings.sharedToken) }
-        if (accounts.isEmpty()) return
-        val main = accounts.first()
+        val mountPoints = settings.mountPoints.filter { it.isUsable(settings.sharedToken) }
+        if (mountPoints.isEmpty()) return
+        val main = mountPoints.first()
         val mainMode = runCatching { ServerMode.valueOf(main.mode) }.getOrDefault(ServerMode.WEBDAV)
         val st = ServerController.state.value
-        // 主账户实际是否仅本机：全局强制优先，其次主账户单独开关
+        // 主挂载点实际是否仅本机：全局强制优先，其次主挂载点单独开关
         val mainLoopback = main.effectiveLoopback(settings.loopbackOnly)
         val mainIp = if (mainLoopback) "127.0.0.1" else (st.lanIp ?: NetUtils.lanIpv4())
         ServerController.update {
@@ -431,67 +431,67 @@ class MountService : Service() {
         )
     }
 
-    /** 停止单个账户的监听（WebDAV + FTP），不碰缓存与会话，不 release 仓库 */
-    private fun stopSingleServer(accountId: String) {
-        httpServers.remove(accountId)?.let { s ->
-            runCatching { s.stop() }.onFailure { LogBus.warn("停止挂载点 $accountId WebDAV 异常：${it.message}") }
-            AccountManager.unregisterPort(s.boundPort)
-            LogBus.info("挂载点 $accountId WebDAV 监听已停止")
+    /** 停止单个挂载点的监听（WebDAV + FTP），不碰缓存与会话，不 release 仓库 */
+    private fun stopSingleServer(mountPointId: String) {
+        httpServers.remove(mountPointId)?.let { s ->
+            runCatching { s.stop() }.onFailure { LogBus.warn("停止挂载点 $mountPointId WebDAV 异常：${it.message}") }
+            MountPointManager.unregisterPort(s.boundPort)
+            LogBus.info("挂载点 $mountPointId WebDAV 监听已停止")
         }
-        ftpServers.remove(accountId)?.let { s ->
-            runCatching { s.stop() }.onFailure { LogBus.warn("停止挂载点 $accountId FTP 异常：${it.message}") }
-            AccountManager.unregisterPort(s.boundPort)
-            LogBus.info("挂载点 $accountId FTP 监听已停止")
+        ftpServers.remove(mountPointId)?.let { s ->
+            runCatching { s.stop() }.onFailure { LogBus.warn("停止挂载点 $mountPointId FTP 异常：${it.message}") }
+            MountPointManager.unregisterPort(s.boundPort)
+            LogBus.info("挂载点 $mountPointId FTP 监听已停止")
         }
     }
 
-    /** 按账户最新配置起单个监听（空壳，认证后经 AccountManager 懒激活仓库） */
+    /** 按挂载点最新配置起单个监听（空壳，认证后经 MountPointManager 懒激活仓库） */
     private fun startSingleServer(
-        account: com.kleinops.gitmount.data.AccountConfig,
+        mountPoint: com.kleinops.gitmount.data.MountPointConfig,
         sharedToken: String,
         forceGlobalLoopback: Boolean,
     ) {
-        val am = runCatching { ServerMode.valueOf(account.mode) }.getOrDefault(ServerMode.WEBDAV)
-        val bindAddr = if (account.effectiveLoopback(forceGlobalLoopback)) "127.0.0.1" else null
-        // 先校验端口未被其他账户占用（同一协议端口不能有两个账户绑定）
+        val am = runCatching { ServerMode.valueOf(mountPoint.mode) }.getOrDefault(ServerMode.WEBDAV)
+        val bindAddr = if (mountPoint.effectiveLoopback(forceGlobalLoopback)) "127.0.0.1" else null
+        // 先校验端口未被其他挂载点占用（同一协议端口不能有两个挂载点绑定）
         val conflict = when (am) {
             ServerMode.WEBDAV ->
-                httpServers.entries.any { it.key != account.id && it.value.boundPort == account.webdavPort }
+                httpServers.entries.any { it.key != mountPoint.id && it.value.boundPort == mountPoint.webdavPort }
             ServerMode.FTP ->
-                ftpServers.entries.any { it.key != account.id && it.value.boundPort == account.ftpPort }
+                ftpServers.entries.any { it.key != mountPoint.id && it.value.boundPort == mountPoint.ftpPort }
         }
         if (conflict) {
-            LogBus.warn("挂载点「${account.name}」${am.label} 端口 ${account.port} 与其他挂载点冲突，未启动")
+            LogBus.warn("挂载点「${mountPoint.name}」${am.label} 端口 ${mountPoint.port} 与其他挂载点冲突，未启动")
             return
         }
         when (am) {
             ServerMode.WEBDAV -> {
-                if (httpServers.containsKey(account.id)) return
+                if (httpServers.containsKey(mountPoint.id)) return
                 val handler = WebDavHandler(
-                    accountId = account.id,
-                    repoProvider = { AccountManager.getRepoBlocking(account, sharedToken) },
-                    authUser = { account.username to account.password },
+                    mountPointId = mountPoint.id,
+                    repoProvider = { MountPointManager.getRepoBlocking(mountPoint, sharedToken) },
+                    authUser = { mountPoint.username to mountPoint.password },
                 )
-                val server = HttpServer(account.webdavPort, { exchange -> handler.handle(exchange) }, bindAddr)
+                val server = HttpServer(mountPoint.webdavPort, { exchange -> handler.handle(exchange) }, bindAddr)
                 server.start()
-                httpServers[account.id] = server
-                AccountManager.registerPort(server.boundPort)
-                LogBus.info("挂载点「${account.name}」WebDAV 监听 ${server.boundPort}（增量启动）")
+                httpServers[mountPoint.id] = server
+                MountPointManager.registerPort(server.boundPort)
+                LogBus.info("挂载点「${mountPoint.name}」WebDAV 监听 ${server.boundPort}（增量启动）")
             }
             ServerMode.FTP -> {
-                if (ftpServers.containsKey(account.id)) return
+                if (ftpServers.containsKey(mountPoint.id)) return
                 val server = FtpServer(
-                    port = account.ftpPort,
-                    accountId = account.id,
-                    repoProvider = { AccountManager.getRepoBlocking(account, sharedToken) },
-                    credentials = { account.username to account.password },
+                    port = mountPoint.ftpPort,
+                    mountPointId = mountPoint.id,
+                    repoProvider = { MountPointManager.getRepoBlocking(mountPoint, sharedToken) },
+                    credentials = { mountPoint.username to mountPoint.password },
                     logger = { msg -> LogBus.info(msg) },
                     bindAddress = bindAddr,
                 )
                 server.start()
-                ftpServers[account.id] = server
-                AccountManager.registerPort(server.boundPort)
-                LogBus.info("挂载点「${account.name}」FTP 监听 ${server.boundPort}（增量启动）")
+                ftpServers[mountPoint.id] = server
+                MountPointManager.registerPort(server.boundPort)
+                LogBus.info("挂载点「${mountPoint.name}」FTP 监听 ${server.boundPort}（增量启动）")
             }
         }
     }
@@ -539,10 +539,10 @@ class MountService : Service() {
                     } ?: throw IllegalStateException("读取配置超时，请重试")
                     hiddenNotification = settings.hideNotification
 
-                    val accounts = settings.accounts.filter { it.isUsable(settings.sharedToken) }
-                    if (accounts.isEmpty()) {
-                        // 区分两种空：一个账户都没有，还是有账户但全被停用/未配置
-                        val reason = if (settings.accounts.isEmpty()) {
+                    val mountPoints = settings.mountPoints.filter { it.isUsable(settings.sharedToken) }
+                    if (mountPoints.isEmpty()) {
+                        // 区分两种空：一个挂载点都没有，还是有挂载点但全被停用/未配置
+                        val reason = if (settings.mountPoints.isEmpty()) {
                             "尚未配置任何挂载点，请先在「挂载点」页新建挂载点并绑定仓库"
                         } else {
                             "没有可启动的挂载点：请检查挂载点开关是否开启、是否已绑定仓库"
@@ -561,68 +561,68 @@ class MountService : Service() {
                         throw IOException("当前无可用网络，无法连接 GitHub，请联网后重试")
                     }
 
-                    // 端口冲突检测：相同协议端口不能有两个账户同时绑定（用户明确要求）
+                    // 端口冲突检测：相同协议端口不能有两个挂载点同时绑定（用户明确要求）
                     val usedPorts = mutableMapOf<Pair<ServerMode, Int>, String>()
-                    accounts.forEach { a ->
-                        val am = runCatching { ServerMode.valueOf(a.mode) }.getOrDefault(ServerMode.WEBDAV)
-                        val key = am to a.port
+                    mountPoints.forEach { mp ->
+                        val am = runCatching { ServerMode.valueOf(mp.mode) }.getOrDefault(ServerMode.WEBDAV)
+                        val key = am to mp.port
                         usedPorts[key]?.let { other ->
-                            throw BindException("端口 ${a.port} 已被挂载点「$other」占用，请为挂载点「${a.name}」换一个端口")
+                            throw BindException("端口 ${mp.port} 已被挂载点「$other」占用，请为挂载点「${mp.name}」换一个端口")
                         }
-                        usedPorts[key] = a.name
+                        usedPorts[key] = mp.name
                     }
 
                     val globalLoopback = settings.loopbackOnly
 
                     // 局域网 IP：只要存在任意一个“非仅本机”的挂载点就计算局域网地址；
                     // 全部挂载点均仅本机时为 null（通知/主界面据此显示 127.0.0.1 或不显示地址）。
-                    val anyLan = accounts.any { !it.effectiveLoopback(globalLoopback) }
+                    val anyLan = mountPoints.any { !it.effectiveLoopback(globalLoopback) }
                     val lanIp = if (anyLan) NetUtils.lanIpv4() else null
 
-                    // 为每个账户起空壳监听（不建仓库；认证通过后经 AccountManager 懒激活）。
-                    // 绑定地址按账户算：全局强制仅本机时全部用 127.0.0.1；否则按各挂载点单独开关。
-                    accounts.forEach { a ->
-                        val am = runCatching { ServerMode.valueOf(a.mode) }.getOrDefault(ServerMode.WEBDAV)
-                        val credentials = { a.username to a.password }
+                    // 为每个挂载点起空壳监听（不建仓库；认证通过后经 MountPointManager 懒激活）。
+                    // 绑定地址按挂载点算：全局强制仅本机时全部用 127.0.0.1；否则按各挂载点单独开关。
+                    mountPoints.forEach { mp ->
+                        val am = runCatching { ServerMode.valueOf(mp.mode) }.getOrDefault(ServerMode.WEBDAV)
+                        val credentials = { mp.username to mp.password }
                         val shared = settings.sharedToken
-                        val bindAddr = if (a.effectiveLoopback(globalLoopback)) "127.0.0.1" else null
+                        val bindAddr = if (mp.effectiveLoopback(globalLoopback)) "127.0.0.1" else null
                         when (am) {
                             ServerMode.WEBDAV -> {
                                 val handler = WebDavHandler(
-                                    accountId = a.id,
-                                    repoProvider = { AccountManager.getRepoBlocking(a, shared) },
+                                    mountPointId = mp.id,
+                                    repoProvider = { MountPointManager.getRepoBlocking(mp, shared) },
                                     authUser = credentials,
                                 )
-                                val server = HttpServer(a.webdavPort, { exchange -> handler.handle(exchange) }, bindAddr)
+                                val server = HttpServer(mp.webdavPort, { exchange -> handler.handle(exchange) }, bindAddr)
                                 server.start()
-                                httpServers[a.id] = server
-                                // 登记监听端口：FTP PASV 选数据端口时避让，防止数据端口撞上账户监听端口
-                                AccountManager.registerPort(server.boundPort)
-                                LogBus.info("挂载点「${a.name}」WebDAV 监听 ${server.boundPort}（休眠，认证后激活）")
+                                httpServers[mp.id] = server
+                                // 登记监听端口：FTP PASV 选数据端口时避让，防止数据端口撞上挂载点监听端口
+                                MountPointManager.registerPort(server.boundPort)
+                                LogBus.info("挂载点「${mp.name}」WebDAV 监听 ${server.boundPort}（休眠，认证后激活）")
                             }
                             ServerMode.FTP -> {
                                 val server = FtpServer(
-                                    port = a.ftpPort,
-                                    accountId = a.id,
-                                    repoProvider = { AccountManager.getRepoBlocking(a, shared) },
+                                    port = mp.ftpPort,
+                                    mountPointId = mp.id,
+                                    repoProvider = { MountPointManager.getRepoBlocking(mp, shared) },
                                     credentials = credentials,
                                     logger = { msg -> LogBus.info(msg) },
                                     bindAddress = bindAddr,
                                 )
                                 server.start()
-                                ftpServers[a.id] = server
-                                AccountManager.registerPort(server.boundPort)
-                                LogBus.info("挂载点「${a.name}」FTP 监听 ${server.boundPort}（休眠，认证后激活）")
+                                ftpServers[mp.id] = server
+                                MountPointManager.registerPort(server.boundPort)
+                                LogBus.info("挂载点「${mp.name}」FTP 监听 ${server.boundPort}（休眠，认证后激活）")
                             }
                         }
                     }
 
-                    // 状态与通知：取第一个已启用账户作为通知的主展示（仅用于通知标题/地址，
-                    // 主界面已按全部账户分别展示各自的状态与地址）
-                    val main = accounts.first()
+                    // 状态与通知：取第一个已启用挂载点作为通知的主展示（仅用于通知标题/地址，
+                    // 主界面已按全部挂载点分别展示各自的状态与地址）
+                    val main = mountPoints.first()
                     val mainMode = runCatching { ServerMode.valueOf(main.mode) }.getOrDefault(ServerMode.WEBDAV)
                     val mainLoopback = main.effectiveLoopback(globalLoopback)
-                    // 通知地址按主账户实际绑定状态：仅本机 → 127.0.0.1；否则局域网 IP（可能为 null）
+                    // 通知地址按主挂载点实际绑定状态：仅本机 → 127.0.0.1；否则局域网 IP（可能为 null）
                     val mainIp = if (mainLoopback) "127.0.0.1" else lanIp
                     ServerController.setState(
                         ServerController.State(
@@ -701,7 +701,7 @@ class MountService : Service() {
         reclaimJob = scope.launch {
             while (isActive) {
                 delay(RECLAIM_INTERVAL_MS)
-                AccountManager.reclaimIdle()
+                MountPointManager.reclaimIdle()
             }
         }
     }
@@ -718,8 +718,8 @@ class MountService : Service() {
             runCatching { s.stop() }.onFailure { LogBus.warn("停止 FTP 异常：${it.message}") }
         }
         ftpServers.clear()
-        // 释放全部账户仓库缓存（含其全部缓存），避免停止服务后仍被引用
-        AccountManager.releaseAll()
+        // 释放全部挂载点仓库缓存（含其全部缓存），避免停止服务后仍被引用
+        MountPointManager.releaseAll()
         if (ServerController.state.value.running || ServerController.state.value.starting) {
             LogBus.info("服务已停止")
         }
