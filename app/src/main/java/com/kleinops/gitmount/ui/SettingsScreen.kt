@@ -22,7 +22,6 @@ import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledButton
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -340,12 +339,12 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 }
             },
             confirmButton = {
-                FilledButton(
+                Button(
                     onClick = {
                         val password = if (backupEncrypt) backupPassword else ""
                         if (backupEncrypt && password.isBlank()) {
                             toast("请输入备份口令")
-                            return@FilledButton
+                            return@Button
                         }
                         showBackupDialog = false
                         vm.exportBackup(backupEncrypt, password) { result ->
@@ -388,12 +387,12 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 }
             },
             confirmButton = {
-                FilledButton(
+                Button(
                     onClick = {
-                        val content = pendingRestoreContent ?: return@FilledButton
+                        val content = pendingRestoreContent ?: return@Button
                         if (restorePassword.isBlank()) {
                             toast("请输入备份口令")
-                            return@FilledButton
+                            return@Button
                         }
                         showRestorePasswordDialog = false
                         pendingRestoreContent = null
