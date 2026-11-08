@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -258,7 +259,7 @@ fun AccountEditScreen(
                     // ---- 容量展示（同步恢复旧版容量卡片）----
                     when (val op = repoOpState) {
                         is RepoOpState.Loading -> Row(verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(modifier = Modifier.width(16.dp), strokeWidth = 2.dp)
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                             Spacer(Modifier.width(8.dp))
                             Text("正在查询容量…", style = MaterialTheme.typography.bodySmall)
                         }
@@ -268,7 +269,7 @@ fun AccountEditScreen(
                             style = MaterialTheme.typography.bodySmall,
                         )
                         is RepoOpState.ClearingHistory -> Row(verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(modifier = Modifier.width(16.dp), strokeWidth = 2.dp)
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                             Spacer(Modifier.width(8.dp))
                             Text("正在清空提交历史…", style = MaterialTheme.typography.bodySmall)
                         }
@@ -335,14 +336,14 @@ fun AccountEditScreen(
                             modifier = Modifier.weight(1f),
                         ) {
                             if (repoOpState is RepoOpState.ClearingHistory) {
-                                CircularProgressIndicator(modifier = Modifier.width(14.dp), strokeWidth = 2.dp)
+                                CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                                 Spacer(Modifier.width(6.dp))
                                 Text("清空中…")
                             } else {
                                 Text("清空提交历史")
                             }
                         }
-                        TextButton(
+                        OutlinedButton(
                             onClick = {
                                 unbind = true
                                 bindingRepo = null
@@ -568,7 +569,7 @@ private fun RepoSelectScreen(
                     modifier = Modifier.weight(1f),
                 ) {
                     if (scanState is ScanState.Working) {
-                        CircularProgressIndicator(modifier = Modifier.width(14.dp), strokeWidth = 2.dp)
+                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(8.dp))
                         Text("扫描中…")
                     } else {
@@ -637,7 +638,7 @@ private fun RepoSelectScreen(
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         if (creatingRepo) {
-                            CircularProgressIndicator(modifier = Modifier.width(14.dp), strokeWidth = 2.dp)
+                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                             Spacer(Modifier.width(8.dp))
                             Text("创建中…")
                         } else {
@@ -650,7 +651,7 @@ private fun RepoSelectScreen(
             // 仓库列表
             when (val s = scanState) {
                 is ScanState.Working -> Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(modifier = Modifier.width(16.dp), strokeWidth = 2.dp)
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.width(8.dp))
                     Text("正在扫描仓库…", style = MaterialTheme.typography.bodySmall)
                 }
