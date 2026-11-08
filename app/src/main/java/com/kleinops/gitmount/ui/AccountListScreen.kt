@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -126,6 +127,7 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
                 onCreate = { creating = true },
                 onEdit = { editTarget = it },
                 onDelete = { deleteTarget = it },
+                forceLoopback = settings.loopbackOnly,
             )
         }
     }
@@ -167,6 +169,8 @@ private fun AccountListContent(
     onCreate: () -> Unit,
     onEdit: (AccountConfig) -> Unit,
     onDelete: (AccountConfig) -> Unit,
+    /** true = 全局「强制仅本机访问」开启，各挂载点单独开关被禁用（一律仅本机） */
+    forceLoopback: Boolean,
 ) {
     val server by vm.serverState.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -262,7 +266,16 @@ private fun AccountListContent(
                                 account = acc,
                                 enabled = acc.enabled,
                                 activeNow = AccountManager.isActive(acc.id),
+                                forceLoopback = forceLoopback,
                                 onToggle = { onToggle(acc, it) },
+                                onToggleLoopback = { lo ->
+                                    vm.setAccountLoopback(acc.id, lo) {
+                                        if (server.running && !server.starting) {
+                                            LogBus.info("挂载点仅本机设置已变更，增量同步该挂载点使其生效")
+                                            MountService.sync(context, acc.id)
+                                        }
+                                    }
+                                },
                                 onClick = { onEdit(acc) },
                                 onDelete = { onDelete(acc) },
                             )
@@ -298,7 +311,10 @@ private fun AccountRow(
     account: AccountConfig,
     enabled: Boolean,
     activeNow: Boolean,
+    /** true = 全局「强制仅本机访问」开启，单独的仅本机开关被禁用（一律仅本机） */
+    forceLoopback: Boolean,
     onToggle: (Boolean) -> Unit,
+    onToggleLoopback: (Boolean) -> Unit,
     onClick: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -308,51 +324,90 @@ private fun AccountRow(
         shape = MaterialTheme.shapes.small,
         color = MaterialTheme.colorScheme.surfaceVariant,
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            account.name,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            when {
+                                !enabled -> "已停用"
+                                activeNow -> "活跃"
+                                else -> "休眠"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = when {
+                                !enabled -> MaterialTheme.colorScheme.outline
+                                activeNow -> MaterialTheme.colorScheme.primary
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    }
                     Text(
-                        account.name,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        when {
-                            !enabled -> "已停用"
-                            activeNow -> "活跃"
-                            else -> "休眠"
-                        },
+                        "${account.repoLabel} ｜ ${account.mode} : ${account.port}",
                         style = MaterialTheme.typography.labelSmall,
-                        color = when {
-                            !enabled -> MaterialTheme.colorScheme.outline
-                            activeNow -> MaterialTheme.colorScheme.primary
-                            else -> MaterialTheme.colorScheme.onSurfaceVariant
-                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
+                    // 仅本机提示：全局强制或本挂载点单独开启时显示
+                    if (forceLoopback || account.loopbackOnly) {
+                        Text(
+                            if (forceLoopback) "仅本机访问（全局强制）" else "仅本机访问",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.tertiary,
+                        )
+                    }
                 }
-                Text(
-                    "${account.repoLabel} ｜ ${account.mode} : ${account.port}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                Switch(checked = enabled, onCheckedChange = onToggle)
+                IconButton(onClick = onDelete) {
+                    Icon(Icons.Filled.Delete, contentDescription = "删除")
+                }
+                Icon(
+                    Icons.Filled.ChevronRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Switch(checked = enabled, onCheckedChange = onToggle)
-            IconButton(onClick = onDelete) {
-                Icon(Icons.Filled.Delete, contentDescription = "删除")
-            }
-            Icon(
-                Icons.Filled.ChevronRight,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            // 分隔线
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = 6.dp),
+                color = MaterialTheme.colorScheme.outlineVariant,
             )
+            // 底行：仅本机访问开关（全局强制时禁用）
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("仅本机访问", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (forceLoopback) "已由全局「强制仅本机访问」覆盖，所有挂载点仅监听 127.0.0.1"
+                        else "开启后该挂载点只监听 127.0.0.1，局域网内其他设备无法访问",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Switch(
+                    checked = forceLoopback || account.loopbackOnly,
+                    onCheckedChange = onToggleLoopback,
+                    enabled = !forceLoopback,
+                )
+            }
         }
     }
 }

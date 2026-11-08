@@ -37,6 +37,12 @@ data class AccountConfig(
      * 服务启停是全局操作（主界面「启动/停止服务」），账户是否参与由这里决定。
      */
     val enabled: Boolean = true,
+    /**
+     * 挂载点单独开关：true = 该挂载点只监听 127.0.0.1（仅本机访问）。
+     * 与全局「强制仅本机访问」（AppSettings.loopbackOnly）叠加：
+     * 全局强制开启时所有挂载点忽略此字段、一律仅本机；全局关闭时按此字段生效。
+     */
+    val loopbackOnly: Boolean = false,
 ) {
     val isConfigured: Boolean
         get() = token.isNotBlank() && owner.isNotBlank() && repoName.isNotBlank()
@@ -57,6 +63,9 @@ data class AccountConfig(
     /** 账户是否可提供服务：账户已启用、仓库已绑定且生效令牌非空 */
     fun isUsable(sharedToken: String): Boolean =
         enabled && effectiveToken(sharedToken).isNotBlank() && owner.isNotBlank() && repoName.isNotBlank()
+
+    /** 该挂载点实际是否仅本机访问：全局强制优先，其次看挂载点单独开关 */
+    fun effectiveLoopback(forceGlobal: Boolean): Boolean = forceGlobal || loopbackOnly
 }
 
 /** 服务运行状态 */

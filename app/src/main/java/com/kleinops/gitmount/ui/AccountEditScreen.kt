@@ -111,6 +111,8 @@ fun AccountEditScreen(
     var username by remember(account?.id) { mutableStateOf(account?.username ?: "") }
     var password by remember(account?.id) { mutableStateOf(account?.password ?: "") }
     var showPassword by remember { mutableStateOf(false) }
+    // 仅本机访问（该挂载点单独开关；全局「强制仅本机」由设置页控制，此处不显示）
+    var loopbackOnly by remember(account?.id) { mutableStateOf(account?.loopbackOnly ?: false) }
 
     // ---- 仓库绑定（选择放到独立页面，配置页只做展示 + 容量/清空历史）----
     var bindingRepo by remember(account?.id) { mutableStateOf<RepoBrief?>(null) }
@@ -453,6 +455,24 @@ fun AccountEditScreen(
                         )
                     }
                 }
+                Spacer(Modifier.height(10.dp))
+                // 仅本机访问（该挂载点单独开关）
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("仅本机访问", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "开启后该挂载点只监听 127.0.0.1，局域网内其他设备无法访问",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Switch(checked = loopbackOnly, onCheckedChange = { loopbackOnly = it })
+                }
             }
 
             Spacer(Modifier.height(4.dp))
@@ -476,6 +496,7 @@ fun AccountEditScreen(
                         username = username.trim(),
                         password = password,
                         enabled = enabled,
+                        loopbackOnly = loopbackOnly,
                     )
                     if (isNew) {
                         vm.createAccount(base) {
@@ -491,7 +512,9 @@ fun AccountEditScreen(
                             account.token != base.token ||
                             account.owner != base.owner ||
                             account.repoName != base.repoName ||
-                            account.branch != base.branch
+                            account.branch != base.branch ||
+                            account.enabled != base.enabled ||
+                            account.loopbackOnly != base.loopbackOnly
                         vm.updateAccount(base) {
                             if (server.running && !server.starting && serviceChanged) {
                                 LogBus.info("挂载点配置已变更，增量同步该挂载点使新设置生效")

@@ -240,7 +240,7 @@ class MountService : Service() {
      *  去抖 + IP 未变静默：onCapabilitiesChanged 高频回调时不再刷日志。 */
     private fun refreshEndpointAfterNetworkChange() {
         val st = ServerController.state.value
-        if (!st.running || st.loopbackOnly) return
+        if (!st.running) return
         val now = System.currentTimeMillis()
         if (now - lastNetworkRefreshMs < NETWORK_REFRESH_DEBOUNCE_MS) return
         lastNetworkRefreshMs = now
@@ -249,11 +249,13 @@ class MountService : Service() {
         if (newIp == oldIp) return // IP 未变：完全静默，不刷新不记日志
         LogBus.info("网络状态变化，IP: ${oldIp ?: "无"} → ${newIp ?: "无"}")
         ServerController.update { it.copy(lanIp = newIp) }
-        if (newIp != null) {
-            updateNotification(
-                getString(R.string.notif_running, st.mode.label, st.port),
-                endpointText(st.mode, newIp, st.port),
-            )
+        // 通知地址取"第一个可用账户"，其可能是仅本机（地址应为 127.0.0.1），
+        // 统一按最新设置刷新主展示信息与通知，避免用旧状态显示错误地址。
+        scope.launch {
+            val settings = withTimeoutOrNull(SETTINGS_READ_TIMEOUT_MS) {
+                runCatching { settingsRepo.settings.first() }.getOrNull()
+            }
+            if (settings != null) refreshPrimaryInfo(settings)
         }
     }
 
@@ -385,7 +387,7 @@ class MountService : Service() {
                 } else {
                     // 账户可用：先停旧的（若有），再按最新配置起监听
                     stopSingleServer(accountId)
-                    startSingleServer(account, settings.sharedToken)
+                    startSingleServer(account, settings.sharedToken, settings.loopbackOnly)
                 }
 
                 // 收尾：开关/删除可能改变了"第一个可用账户"（通知与主界面主展示），
@@ -410,18 +412,22 @@ class MountService : Service() {
         val main = accounts.first()
         val mainMode = runCatching { ServerMode.valueOf(main.mode) }.getOrDefault(ServerMode.WEBDAV)
         val st = ServerController.state.value
+        // 主账户实际是否仅本机：全局强制优先，其次主账户单独开关
+        val mainLoopback = main.effectiveLoopback(settings.loopbackOnly)
+        val mainIp = if (mainLoopback) "127.0.0.1" else (st.lanIp ?: NetUtils.lanIpv4())
         ServerController.update {
             it.copy(
                 mode = mainMode,
                 port = main.port,
                 username = main.username,
                 password = main.password,
+                lanIp = if (mainLoopback) null else mainIp,
                 loopbackOnly = settings.loopbackOnly,
             )
         }
         updateNotification(
             getString(R.string.notif_running, mainMode.label, main.port),
-            endpointText(mainMode, st.lanIp, main.port),
+            endpointText(mainMode, mainIp, main.port),
         )
     }
 
@@ -440,9 +446,13 @@ class MountService : Service() {
     }
 
     /** 按账户最新配置起单个监听（空壳，认证后经 AccountManager 懒激活仓库） */
-    private fun startSingleServer(account: com.kleinops.gitmount.data.AccountConfig, sharedToken: String) {
+    private fun startSingleServer(
+        account: com.kleinops.gitmount.data.AccountConfig,
+        sharedToken: String,
+        forceGlobalLoopback: Boolean,
+    ) {
         val am = runCatching { ServerMode.valueOf(account.mode) }.getOrDefault(ServerMode.WEBDAV)
-        val bindAddr = if (ServerController.state.value.loopbackOnly) "127.0.0.1" else null
+        val bindAddr = if (account.effectiveLoopback(forceGlobalLoopback)) "127.0.0.1" else null
         // 先校验端口未被其他账户占用（同一协议端口不能有两个账户绑定）
         val conflict = when (am) {
             ServerMode.WEBDAV ->
@@ -562,14 +572,20 @@ class MountService : Service() {
                         usedPorts[key] = a.name
                     }
 
-                    val bindAddr = if (settings.loopbackOnly) "127.0.0.1" else null
-                    val lanIp = if (settings.loopbackOnly) null else NetUtils.lanIpv4()
+                    val globalLoopback = settings.loopbackOnly
 
-                    // 为每个账户起空壳监听（不建仓库；认证通过后经 AccountManager 懒激活）
+                    // 局域网 IP：只要存在任意一个“非仅本机”的挂载点就计算局域网地址；
+                    // 全部挂载点均仅本机时为 null（通知/主界面据此显示 127.0.0.1 或不显示地址）。
+                    val anyLan = accounts.any { !it.effectiveLoopback(globalLoopback) }
+                    val lanIp = if (anyLan) NetUtils.lanIpv4() else null
+
+                    // 为每个账户起空壳监听（不建仓库；认证通过后经 AccountManager 懒激活）。
+                    // 绑定地址按账户算：全局强制仅本机时全部用 127.0.0.1；否则按各挂载点单独开关。
                     accounts.forEach { a ->
                         val am = runCatching { ServerMode.valueOf(a.mode) }.getOrDefault(ServerMode.WEBDAV)
                         val credentials = { a.username to a.password }
                         val shared = settings.sharedToken
+                        val bindAddr = if (a.effectiveLoopback(globalLoopback)) "127.0.0.1" else null
                         when (am) {
                             ServerMode.WEBDAV -> {
                                 val handler = WebDavHandler(
@@ -605,13 +621,16 @@ class MountService : Service() {
                     // 主界面已按全部账户分别展示各自的状态与地址）
                     val main = accounts.first()
                     val mainMode = runCatching { ServerMode.valueOf(main.mode) }.getOrDefault(ServerMode.WEBDAV)
+                    val mainLoopback = main.effectiveLoopback(globalLoopback)
+                    // 通知地址按主账户实际绑定状态：仅本机 → 127.0.0.1；否则局域网 IP（可能为 null）
+                    val mainIp = if (mainLoopback) "127.0.0.1" else lanIp
                     ServerController.setState(
                         ServerController.State(
                             running = true,
                             starting = false,
                             mode = mainMode,
                             port = main.port,
-                            lanIp = lanIp,
+                            lanIp = if (mainLoopback) null else lanIp,
                             username = main.username,
                             password = main.password,
                             loopbackOnly = settings.loopbackOnly,
@@ -619,7 +638,7 @@ class MountService : Service() {
                     )
                     updateNotification(
                         getString(R.string.notif_running, mainMode.label, main.port),
-                        endpointText(mainMode, lanIp, main.port),
+                        endpointText(mainMode, mainIp, main.port),
                     )
                     // 启动周期空闲回收：每 10 分钟统一清扫一次超时挂载点
                     startReclaimLoop()

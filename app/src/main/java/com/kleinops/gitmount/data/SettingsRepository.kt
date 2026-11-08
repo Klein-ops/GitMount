@@ -23,7 +23,9 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 
 /** 用户配置（token 以 Keystore AES-GCM 加密后落盘） */
 data class AppSettings(
-    /** true = 服务只监听 127.0.0.1，仅本机可访问，不暴露局域网（全局设置） */
+    /** true = 强制所有挂载点只监听 127.0.0.1（全局覆盖开关）。
+     *  开启时无视各挂载点的单独开关、一律仅本机可访问；
+     *  关闭时按各挂载点的单独开关（AccountConfig.loopbackOnly）生效。 */
     val loopbackOnly: Boolean = false,
     /** true = 隐藏前台服务常驻通知（改用静默渠道）。默认 true：常驻通知默认关闭（全局设置） */
     val hideNotification: Boolean = true,
@@ -191,6 +193,7 @@ class SettingsRepository(private val context: Context) {
                     username = o.optString("username", ""),
                     password = o.optString("password", ""),
                     enabled = !o.has("enabled") || o.optBoolean("enabled", true),
+                    loopbackOnly = o.optBoolean("loopbackOnly", false),
                 )
             }
         } catch (e: Exception) {
@@ -298,6 +301,7 @@ class SettingsRepository(private val context: Context) {
                     .put("username", a.username)
                     .put("password", a.password)
                     .put("enabled", a.enabled)
+                    .put("loopbackOnly", a.loopbackOnly)
             )
         }
         return arr.toString()

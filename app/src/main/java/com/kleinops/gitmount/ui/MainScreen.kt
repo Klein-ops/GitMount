@@ -267,11 +267,13 @@ private fun ServerCard(
                 cm.setPrimaryClip(ClipData.newPlainText("GitMount 地址", text))
                 scope.launch { snackbar.showSnackbar("$label 已复制到剪贴板") }
             }
-            // 简略展示：全部已启用账户的状态 + 仓库 + 可复制地址（一行一个）
-            val baseIp = if (server.loopbackOnly) "127.0.0.1" else (server.lanIp ?: "127.0.0.1")
+            // 简略展示：全部已启用账户的状态 + 仓库 + 可复制地址（一行一个）。
+            // 每个挂载点地址按各自实际绑定地址展示：仅本机的显示 127.0.0.1，否则显示局域网 IP。
             val shown = settings.accounts.filter { it.isUsable(settings.sharedToken) }
             shown.forEachIndexed { idx, acc ->
                 val mode = runCatching { ServerMode.valueOf(acc.mode) }.getOrDefault(ServerMode.WEBDAV)
+                val accLoopback = acc.effectiveLoopback(settings.loopbackOnly)
+                val baseIp = if (accLoopback) "127.0.0.1" else (server.lanIp ?: "127.0.0.1")
                 val addr = if (mode == ServerMode.WEBDAV) "http://$baseIp:${acc.port}/" else "ftp://$baseIp:${acc.port}/"
                 val activeNow = AccountManager.isActive(acc.id)
                 InfoRow(
@@ -294,8 +296,10 @@ private fun ServerCard(
             }
             Spacer(Modifier.height(12.dp))
             Text(
-                if (server.loopbackOnly) {
-                    "当前仅本机可访问（只监听 127.0.0.1）。如需局域网访问，请在右上角设置里关闭“仅本机访问”。"
+                if (settings.loopbackOnly) {
+                    "已开启「强制仅本机访问」：所有挂载点只监听 127.0.0.1。如需局域网访问，请到设置里关闭全局开关，再按需开启各挂载点。"
+                } else if (shown.any { it.effectiveLoopback(false) }) {
+                    "部分挂载点仅本机可访问（只监听 127.0.0.1），其余可局域网访问；各挂载点可单独开关。"
                 } else {
                     "点击地址即可复制。局域网内其他设备用局域网地址访问；手机本机用 127.0.0.1 地址更稳定。"
                 },

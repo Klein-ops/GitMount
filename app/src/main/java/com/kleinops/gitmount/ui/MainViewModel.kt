@@ -458,6 +458,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * 切换挂载点的"仅本机访问"开关（账户页卡片 Switch）。
+     * 全局「强制仅本机访问」开启时此开关被禁用（一律仅本机）；
+     * 全局关闭时按本开关（该挂载点是否只监听 127.0.0.1）生效。
+     */
+    fun setAccountLoopback(accountId: String, loopback: Boolean, onSaved: () -> Unit = {}) {
+        viewModelScope.launch {
+            val accounts = settings.value.accounts
+            accounts.find { it.id == accountId }?.let { acc ->
+                settingsRepo.saveAccount(acc.copy(loopbackOnly = loopback), activate = false)
+                LogBus.info(
+                    "挂载点「${acc.name}」${if (loopback) "已设为仅本机访问" else "已允许局域网访问"}"
+                )
+                onSaved()
+            }
+        }
+    }
+
     /** 重命名账户 */
     fun renameAccount(id: String, name: String) {
         val n = name.trim().ifBlank { return }

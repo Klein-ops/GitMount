@@ -103,8 +103,8 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
             // ---- 网络与后台 ----
             SectionCard(title = "网络与后台") {
                 SettingSwitchRow(
-                    title = "仅本机访问",
-                    desc = "开启后只监听 127.0.0.1，局域网内其他设备无法访问，更安全",
+                    title = "强制仅本机访问",
+                    desc = "开启后所有挂载点一律只监听 127.0.0.1（覆盖每个挂载点的单独开关），局域网内其他设备无法访问",
                     checked = loopbackOnly,
                     onCheckedChange = { loopbackOnly = it },
                 )
