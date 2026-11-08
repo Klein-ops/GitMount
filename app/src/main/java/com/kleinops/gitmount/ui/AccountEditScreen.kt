@@ -494,8 +494,8 @@ fun AccountEditScreen(
                             account.branch != base.branch
                         vm.updateAccount(base) {
                             if (server.running && !server.starting && serviceChanged) {
-                                LogBus.info("挂载点配置已变更，重启服务使新设置生效")
-                                MountService.restart(context)
+                                LogBus.info("挂载点配置已变更，增量同步该挂载点使新设置生效")
+                                MountService.sync(context, base.id)
                             }
                             onSaved()
                         }

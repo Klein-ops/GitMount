@@ -26,11 +26,14 @@ class HttpServer(
      *  与 GitRepository.MAX_FILE_SIZE（40MB 本地拦截线）保持一致 */
     private val maxBodyBytes: Long = 40L * 1000 * 1000,
 ) {
-    private val serverSocket = if (bindAddress == null) {
-        ServerSocket(port)
-    } else {
-        ServerSocket().apply {
-            reuseAddress = true
+    private val serverSocket = ServerSocket().apply {
+        // 必须显式 reuseAddress：增量同步会"停旧监听→立即用同端口重新 bind"，
+        // 未设置时刚 close 的 listener 端口可能处于 TIME_WAIT 导致 Address already in use。
+        // （FtpServer 一直有 reuseAddress=true，这里补齐保持一致）
+        reuseAddress = true
+        if (bindAddress == null) {
+            bind(java.net.InetSocketAddress(port))
+        } else {
             bind(java.net.InetSocketAddress(bindAddress, port))
         }
     }

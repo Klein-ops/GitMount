@@ -68,6 +68,8 @@ import com.kleinops.gitmount.ui.components.SectionCard
 @Composable
 fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
     val settings by vm.settings.collectAsStateWithLifecycle()
+    val server by vm.serverState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
 
     val accounts = settings.accounts
 
@@ -135,7 +137,14 @@ fun AccountListScreen(vm: MainViewModel, onBack: () -> Unit) {
             title = { Text("删除挂载点？") },
             text = { Text("将删除挂载点「${acc.name}」及其仓库绑定、端口与访问账号配置。此操作不可撤销。") },
             confirmButton = {
-                Button(onClick = { vm.deleteAccount(acc.id); deleteTarget = null }) { Text("删除") }
+                Button(onClick = {
+                    val id = acc.id
+                    vm.deleteAccount(id) {
+                        // 删除挂载点后同步服务：释放该账户监听与端口，避免删了还占着
+                        if (server.running && !server.starting) MountService.sync(context, id)
+                    }
+                    deleteTarget = null
+                }) { Text("删除") }
             },
             dismissButton = {
                 TextButton(onClick = { deleteTarget = null }) { Text("取消") }
@@ -162,12 +171,13 @@ private fun AccountListContent(
     val server by vm.serverState.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
-    // 账户开关切换：落盘后若服务在运行，自动重启让新开关生效
+    // 账户开关切换：落盘后若服务在运行，增量同步该挂载点（只启停这一个，
+    // 不再全量重启整个服务——避免打断其他挂载点的连接/传输、清空其缓存）
     fun onToggle(acc: AccountConfig, enabled: Boolean) {
         vm.setAccountEnabled(acc.id, enabled) {
             if (server.running && !server.starting) {
-                LogBus.info("挂载点开关已变更，重启服务使其生效")
-                MountService.restart(context)
+                LogBus.info("挂载点开关已变更，增量同步该挂载点使其生效")
+                MountService.sync(context, acc.id)
             }
         }
     }

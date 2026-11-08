@@ -496,10 +496,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** 删除账户（若删的是激活账户，激活回退到剩余第一个） */
-    fun deleteAccount(id: String) {
+    fun deleteAccount(id: String, onSaved: () -> Unit = {}) {
         viewModelScope.launch {
             settingsRepo.deleteAccount(id)
             LogBus.info("已删除挂载点")
+            onSaved()
         }
     }
 

@@ -49,6 +49,8 @@ class MountService : Service() {
         const val ACTION_START = "com.kleinops.gitmount.action.START"
         const val ACTION_STOP = "com.kleinops.gitmount.action.STOP"
         const val ACTION_RESTART = "com.kleinops.gitmount.action.RESTART"
+        const val ACTION_SYNC = "com.kleinops.gitmount.action.SYNC"
+        const val EXTRA_ACCOUNT_ID = "com.kleinops.gitmount.extra.ACCOUNT_ID"
 
         /**
          * 启动流程整体超时：从设置读取 → 端口预检 → GitHub 连通性校验 → 拉起服务器，
@@ -97,6 +99,29 @@ class MountService : Service() {
             }
         }
 
+        /**
+         * 由 UI 调用：按最新保存的配置增量同步单个挂载点（只启停该账户的监听，
+         * 不动其他账户的 socket / 缓存 / 会话 / 统计）。多个挂载点先后变更时
+         * 各发一次，服务端逐个处理，互不干扰。
+         */
+        fun sync(context: Context, accountId: String) {
+            val intent = Intent(context, MountService::class.java).apply {
+                action = ACTION_SYNC
+                putExtra(EXTRA_ACCOUNT_ID, accountId)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
+
+        /**
+         * 按最新保存的设置重启整个服务（协议/端口/账号/仓库批量变更后使用；
+         * 仅需全局设置变更时也走这里，此时确实需要全量重建）。
+         * 与 ACTION_STOP 不同：重启不退出服务、不摘除前台，避免前台服务
+         * 出现"非前台间隙"被系统判定违规。
+         */
         fun stop(context: Context) {
             // 用户手动停止：清除"期望运行"意图，即便进程被杀也不再自动恢复
             persistIntent(context, enabled = false)
@@ -128,9 +153,11 @@ class MountService : Service() {
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    /** 每个账户一个服务器实例：accountId -> HttpServer / FtpServer（空壳监听，认证后才激活仓库） */
-    private val httpServers = mutableMapOf<String, HttpServer>()
-    private val ftpServers = mutableMapOf<String, FtpServer>()
+    /** 每个账户一个服务器实例：accountId -> HttpServer / FtpServer（空壳监听，认证后才激活仓库）。
+     *  用 ConcurrentHashMap：增量同步（IO 线程）与全量启停（主线程 / IO 线程）可能并发访问，
+     *  普通 HashMap 的 put/remove 在并发下会破坏结构抛 ConcurrentModificationException。 */
+    private val httpServers = java.util.concurrent.ConcurrentHashMap<String, HttpServer>()
+    private val ftpServers = java.util.concurrent.ConcurrentHashMap<String, FtpServer>()
     private var startJob: Job? = null
 
     /** 周期空闲回收任务（每 10 分钟清扫一次超时挂载点；服务停止时取消） */
@@ -242,6 +269,19 @@ class MountService : Service() {
                 restartServers()
                 return START_STICKY
             }
+            ACTION_SYNC -> {
+                // 单个挂载点增量同步：只启停该账户，不动其他账户的监听/缓存/会话。
+                // 相比全量重启，不掐断其他挂载点的进行中传输、不清空其仓库缓存、
+                // 不重置累计流量统计——开关单个挂载点不应影响其余挂载点。
+                val accountId = intent.getStringExtra(EXTRA_ACCOUNT_ID)
+                if (accountId.isNullOrBlank()) {
+                    LogBus.warn("收到同步指令但缺少 accountId，忽略")
+                    return START_STICKY
+                }
+                LogBus.info("收到挂载点增量同步指令：$accountId")
+                syncSingleAccount(accountId)
+                return START_STICKY
+            }
             ACTION_START -> {
                 // 多账户动态激活：启动全部账户的监听（空壳，认证后才激活仓库）
                 startServers()
@@ -290,6 +330,150 @@ class MountService : Service() {
         if (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
             AccountManager.reclaimIdle()
             LogBus.info("系统内存压力回调（level=$level），已回收空闲挂载点缓存")
+        }
+    }
+
+    /**
+     * 单账户增量同步：按该账户最新保存的配置，只增删这一个挂载点的监听。
+     *
+     * 与全量重启的本质区别：
+     * - 只停/起目标账户的 socket，其他账户的监听、进行中传输、仓库缓存、
+     *   累计流量统计全部保持不动；
+     * - 停监听只关 ServerSocket（不再掐线程池、不清缓存、不 release 仓库）；
+     * - 同步走协程（IO 线程），不阻塞主线程，开关不产生明显卡顿。
+     *
+     * 配置读取失败 / 账户已不存在时静默清理该账户的监听与残留状态
+     * （删除挂载点后也会走到这里，把端口释放掉）。
+     */
+    private fun syncSingleAccount(accountId: String) {
+        // 正常情况下服务应已在运行（UI 只在 running 时发同步）；若不在运行，
+        // 说明用户刚停过服务，这里不重复拉起，直接清理该账户残留状态即可。
+        if (!ServerController.state.value.running) {
+            LogBus.info("服务未在运行，跳过挂载点增量同步（$accountId）")
+            return
+        }
+        scope.launch {
+            try {
+                val settings = withTimeoutOrNull(SETTINGS_READ_TIMEOUT_MS) {
+                    runCatching { settingsRepo.settings.first() }.getOrNull()
+                }
+                if (settings == null) {
+                    LogBus.warn("挂载点增量同步（$accountId）中止：读取配置超时")
+                    return@launch
+                }
+                val account = settings.accounts.firstOrNull { it.id == accountId }
+                val usable = account != null && account.isUsable(settings.sharedToken)
+
+                if (account == null) {
+                    // 账户已被删除：释放监听与缓存，端口归还
+                    LogBus.info("挂载点 $accountId 已删除，清理其监听与缓存")
+                    stopSingleServer(accountId)
+                    AccountManager.release(accountId)
+                } else if (!usable) {
+                    // 账户仍在但不可用（停用/未配置完整）：停监听即可，缓存可留待空闲回收
+                    LogBus.info("挂载点「${account.name}」不可用（停用或配置不完整），停止其监听（$accountId）")
+                    stopSingleServer(accountId)
+                } else {
+                    // 账户可用：先停旧的（若有），再按最新配置起监听
+                    stopSingleServer(accountId)
+                    startSingleServer(account, settings.sharedToken)
+                }
+
+                // 收尾：开关/删除可能改变了"第一个可用账户"（通知与主界面主展示），
+                // 无论上述哪种结果都刷新一次，保证地址端口与最新配置一致
+                refreshPrimaryInfo(settings)
+            } catch (e: Exception) {
+                // 增量同步失败收敛成日志，不让未捕获异常崩掉应用
+                LogBus.error("挂载点增量同步失败（$accountId）：${e.message}")
+            }
+        }
+    }
+
+    /**
+     * 刷新通知与 ServerController 的"主展示账户"信息（第一个可用账户）。
+     * 增量同步只动了单个挂载点，但若它恰好是第一个可用账户（改端口/停用/删除），
+     * 通知与主界面的地址端口会变化，这里统一按最新配置刷新。
+     * 不动 running / lanIp / 会话 / 流量统计——这些与单挂载点变更无关。
+     */
+    private fun refreshPrimaryInfo(settings: com.kleinops.gitmount.data.AppSettings) {
+        val accounts = settings.accounts.filter { it.isUsable(settings.sharedToken) }
+        if (accounts.isEmpty()) return
+        val main = accounts.first()
+        val mainMode = runCatching { ServerMode.valueOf(main.mode) }.getOrDefault(ServerMode.WEBDAV)
+        val st = ServerController.state.value
+        ServerController.update {
+            it.copy(
+                mode = mainMode,
+                port = main.port,
+                username = main.username,
+                password = main.password,
+                loopbackOnly = settings.loopbackOnly,
+            )
+        }
+        updateNotification(
+            getString(R.string.notif_running, mainMode.label, main.port),
+            endpointText(mainMode, st.lanIp, main.port),
+        )
+    }
+
+    /** 停止单个账户的监听（WebDAV + FTP），不碰缓存与会话，不 release 仓库 */
+    private fun stopSingleServer(accountId: String) {
+        httpServers.remove(accountId)?.let { s ->
+            runCatching { s.stop() }.onFailure { LogBus.warn("停止挂载点 $accountId WebDAV 异常：${it.message}") }
+            AccountManager.unregisterPort(s.boundPort)
+            LogBus.info("挂载点 $accountId WebDAV 监听已停止")
+        }
+        ftpServers.remove(accountId)?.let { s ->
+            runCatching { s.stop() }.onFailure { LogBus.warn("停止挂载点 $accountId FTP 异常：${it.message}") }
+            AccountManager.unregisterPort(s.boundPort)
+            LogBus.info("挂载点 $accountId FTP 监听已停止")
+        }
+    }
+
+    /** 按账户最新配置起单个监听（空壳，认证后经 AccountManager 懒激活仓库） */
+    private fun startSingleServer(account: com.kleinops.gitmount.data.AccountConfig, sharedToken: String) {
+        val am = runCatching { ServerMode.valueOf(account.mode) }.getOrDefault(ServerMode.WEBDAV)
+        val bindAddr = if (ServerController.state.value.loopbackOnly) "127.0.0.1" else null
+        // 先校验端口未被其他账户占用（同一协议端口不能有两个账户绑定）
+        val conflict = when (am) {
+            ServerMode.WEBDAV ->
+                httpServers.entries.any { it.key != account.id && it.value.boundPort == account.webdavPort }
+            ServerMode.FTP ->
+                ftpServers.entries.any { it.key != account.id && it.value.boundPort == account.ftpPort }
+        }
+        if (conflict) {
+            LogBus.warn("挂载点「${account.name}」${am.label} 端口 ${account.port} 与其他挂载点冲突，未启动")
+            return
+        }
+        when (am) {
+            ServerMode.WEBDAV -> {
+                if (httpServers.containsKey(account.id)) return
+                val handler = WebDavHandler(
+                    accountId = account.id,
+                    repoProvider = { AccountManager.getRepoBlocking(account, sharedToken) },
+                    authUser = { account.username to account.password },
+                )
+                val server = HttpServer(account.webdavPort, { exchange -> handler.handle(exchange) }, bindAddr)
+                server.start()
+                httpServers[account.id] = server
+                AccountManager.registerPort(server.boundPort)
+                LogBus.info("挂载点「${account.name}」WebDAV 监听 ${server.boundPort}（增量启动）")
+            }
+            ServerMode.FTP -> {
+                if (ftpServers.containsKey(account.id)) return
+                val server = FtpServer(
+                    port = account.ftpPort,
+                    accountId = account.id,
+                    repoProvider = { AccountManager.getRepoBlocking(account, sharedToken) },
+                    credentials = { account.username to account.password },
+                    logger = { msg -> LogBus.info(msg) },
+                    bindAddress = bindAddr,
+                )
+                server.start()
+                ftpServers[account.id] = server
+                AccountManager.registerPort(server.boundPort)
+                LogBus.info("挂载点「${account.name}」FTP 监听 ${server.boundPort}（增量启动）")
+            }
         }
     }
 
