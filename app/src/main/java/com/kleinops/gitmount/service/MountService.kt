@@ -78,10 +78,19 @@ class MountService : Service() {
             val intent = Intent(context, MountService::class.java).apply {
                 action = ACTION_START
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (e: Exception) {
+                // Android 12+ 应用处于后台时启动前台服务会被系统拒绝（ForegroundServiceStartNotAllowedException），
+                // 例如：用户手动停止服务后进程被杀、自愈在后台尝试恢复。此时不崩溃、不丢意图，
+                // 退回 START_STICKY：等系统稍后把服务重新拉起（onStartCommand 仍会按持久化意图恢复）。
+                LogBus.warn("无法立即启动前台服务（可能处于后台受限）：${e.message}；等待系统恢复调度")
+                runCatching { context.startService(intent) }
+                    .onFailure { LogBus.warn("后台 startService 兜底也失败：${it.message}") }
             }
         }
 
