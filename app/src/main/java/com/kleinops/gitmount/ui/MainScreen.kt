@@ -12,6 +12,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -454,11 +455,14 @@ private fun RateLimitCard(vm: MainViewModel) {
 /**
  * 运行日志卡片。
  * 独立订阅日志流：服务运行时的日志更新只重组本卡片，避免整页被高频日志拖动（性能优化）。
+ * 默认折叠只显示最近 5 条；点击日志区域展开显示最近 30 条，再点收起。
  */
 @Composable
 private fun LogCard(vm: MainViewModel) {
     val context = LocalContext.current
     val logs by vm.logs.collectAsStateWithLifecycle()
+    // 默认折叠（展开态不跨进程保存，进程重启后回到折叠，符合"默认折叠"预期）
+    var expanded by rememberSaveable { mutableStateOf(false) }
     SectionCard(
         title = "运行日志",
         trailing = {
@@ -471,15 +475,24 @@ private fun LogCard(vm: MainViewModel) {
         if (logs.isEmpty()) {
             EmptyHint("暂无日志")
         } else {
-            Column {
-                logs.take(30).forEach { LogRow(it) }
-            }
-            if (logs.size > 30) {
+            val shown = if (expanded) logs.take(30) else logs.take(5)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded },
+            ) {
+                shown.forEach { LogRow(it) }
                 Spacer(Modifier.height(6.dp))
+                // 折叠/展开提示：折叠时显示总数与"点击展开"，展开时提示可收起
+                val tailText = if (expanded) {
+                    if (logs.size > 30) "已展开最近 30 条（共 ${logs.size} 条），点击收起" else "点击收起"
+                } else {
+                    if (logs.size > 5) "显示最近 5 条，共 ${logs.size} 条，点击展开" else "点击展开"
+                }
                 Text(
-                    "仅显示最近 30 条，共 ${logs.size} 条",
+                    tailText,
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.outline,
+                    color = MaterialTheme.colorScheme.primary,
                 )
             }
         }
