@@ -43,7 +43,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -182,9 +184,25 @@ private fun MountPointListContent(
     val server by vm.serverState.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
+    // ---- 开关乐观更新（解决"拨开关卡一下"） ----
+    // Switch 的 checked 直接绑定 DataStore 流时，要等"落盘 → 流全量重读 + 各挂载点
+    // token 经 Keystore 解密 → emit → 重组"全部完成才翻转，用户会明显感觉卡顿。
+    // 这里保存"用户已拨、流尚未收敛"的期望值：拨下去 UI 立即翻转，落盘与增量同步
+    // 照旧在后台异步执行；流 emit 出新值（与期望值一致）后自动清除，交还流驱动。
+    val optimisticEnabled = remember { mutableStateMapOf<String, Boolean>() }
+    val optimisticLoopback = remember { mutableStateMapOf<String, Boolean>() }
+    // 流收敛后清除对应期望值（两开关都处理；含挂载点被删除的情况，map 该键自然消失）
+    LaunchedEffect(mountPoints) {
+        mountPoints.forEach { mp ->
+            if (optimisticEnabled[mp.id] == mp.enabled) optimisticEnabled.remove(mp.id)
+            if (optimisticLoopback[mp.id] == mp.loopbackOnly) optimisticLoopback.remove(mp.id)
+        }
+    }
+
     // 挂载点开关切换：落盘后若服务在运行，增量同步该挂载点（只启停这一个，
     // 不再全量重启整个服务——避免打断其他挂载点的连接/传输、清空其缓存）
     fun onToggle(mp: MountPointConfig, enabled: Boolean) {
+        optimisticEnabled[mp.id] = enabled
         vm.setMountPointEnabled(mp.id, enabled) {
             if (server.running && !server.starting) {
                 LogBus.info("挂载点开关已变更，增量同步该挂载点使其生效")
@@ -271,11 +289,13 @@ private fun MountPointListContent(
                         mountPoints.forEach { mp ->
                             MountPointRow(
                                 mountPoint = mp,
-                                enabled = mp.enabled,
+                                enabled = optimisticEnabled[mp.id] ?: mp.enabled,
+                                loopback = optimisticLoopback[mp.id] ?: mp.loopbackOnly,
                                 activeNow = MountPointManager.isActive(mp.id),
                                 forceLoopback = forceLoopback,
                                 onToggle = { onToggle(mp, it) },
                                 onToggleLoopback = { lo ->
+                                    optimisticLoopback[mp.id] = lo
                                     vm.setMountPointLoopback(mp.id, lo) {
                                         if (server.running && !server.starting) {
                                             LogBus.info("挂载点仅本机设置已变更，增量同步该挂载点使其生效")
@@ -317,6 +337,8 @@ private fun MountPointListContent(
 private fun MountPointRow(
     mountPoint: MountPointConfig,
     enabled: Boolean,
+    /** 仅本机访问开关的显示值（已叠加乐观更新） */
+    loopback: Boolean,
     activeNow: Boolean,
     /** true = 全局「强制仅本机访问」开启，单独的仅本机开关被禁用（一律仅本机） */
     forceLoopback: Boolean,
@@ -370,7 +392,7 @@ private fun MountPointRow(
                         overflow = TextOverflow.Ellipsis,
                     )
                     // 仅本机提示：全局强制或本挂载点单独开启时显示
-                    if (forceLoopback || mountPoint.loopbackOnly) {
+                    if (forceLoopback || loopback) {
                         Text(
                             if (forceLoopback) "仅本机访问（全局强制）" else "仅本机访问",
                             style = MaterialTheme.typography.labelSmall,
@@ -410,7 +432,7 @@ private fun MountPointRow(
                 }
                 Spacer(Modifier.width(8.dp))
                 Switch(
-                    checked = forceLoopback || mountPoint.loopbackOnly,
+                    checked = forceLoopback || loopback,
                     onCheckedChange = onToggleLoopback,
                     enabled = !forceLoopback,
                 )
