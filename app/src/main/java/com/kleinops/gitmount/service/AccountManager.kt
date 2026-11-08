@@ -15,8 +15,12 @@ import java.util.concurrent.ConcurrentHashMap
  */
 object AccountManager {
 
-    /** 空闲回收阈值：账户无活跃操作超过该时长即释放仓库缓存 */
-    private const val IDLE_RECLAIM_MS = 15 * 60 * 1000L
+    /**
+     * 空闲回收阈值：账户无活跃操作超过该时长即释放仓库缓存。
+     * 8 分钟：介于用户要求的 5~10 分钟之间；大文件传输由 activeOps
+     * 全程占用保护，不会被该阈值误杀（FTP 会话 beginOp/endOp 严格配对）。
+     */
+    private const val IDLE_RECLAIM_MS = 8 * 60 * 1000L
 
     private class ActiveEntry {
         @Volatile var repo: GitRepository? = null

@@ -27,6 +27,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -58,6 +59,14 @@ class MountService : Service() {
 
         /** DataStore 读取超时：本地文件操作正常毫秒级，兜底防卡死 */
         private const val SETTINGS_READ_TIMEOUT_MS = 10_000L
+
+        /**
+         * 空闲回收清扫周期：每 10 分钟统一检查一次所有挂载点，
+         * 把空闲超过阈值的挂载点释放掉。周期整体扫描（而非每时每刻
+         * 后台运算）占用极低；清理时点最多延迟一个周期，允许不精准
+         * （挂载点实际在超时后 0~10 分钟内被清掉）。
+         */
+        private const val RECLAIM_INTERVAL_MS = 10 * 60 * 1000L
 
         /** 由 UI 调用：启动服务（多账户架构下启动全部账户的监听；mode/port 仅保留兼容） */
         fun start(context: Context, mode: ServerMode = ServerMode.WEBDAV, port: Int = 0) {
@@ -122,6 +131,9 @@ class MountService : Service() {
     private val httpServers = mutableMapOf<String, HttpServer>()
     private val ftpServers = mutableMapOf<String, FtpServer>()
     private var startJob: Job? = null
+
+    /** 周期空闲回收任务（每 10 分钟清扫一次超时挂载点；服务停止时取消） */
+    private var reclaimJob: Job? = null
     private lateinit var settingsRepo: SettingsRepository
 
     /** true = 隐藏前台服务常驻通知（用静默渠道），启动后从设置读取 */
@@ -415,6 +427,8 @@ class MountService : Service() {
                         getString(R.string.notif_running, mainMode.label, main.port),
                         endpointText(mainMode, lanIp, main.port),
                     )
+                    // 启动周期空闲回收：每 10 分钟统一清扫一次超时挂载点
+                    startReclaimLoop()
                 }
                 // 整个启动流程超时兜底
                 if (completed == null) {
@@ -460,7 +474,29 @@ class MountService : Service() {
         return if (mode == ServerMode.WEBDAV) "http://$ip:$port/" else "ftp://$ip:$port/"
     }
 
+    /**
+     * 周期空闲回收：服务运行期间每 10 分钟统一清扫一次空闲超时的挂载点。
+     * 平时协程挂起在 delay 上，不占 CPU、不做后台运算；只有到点才醒一次，
+     * 遍历 entries 把空闲超过阈值的挂载点释放回"休眠"态。
+     * 清理时点允许延迟一个周期（8 分钟超时后 0~10 分钟内被清掉），
+     * 换取极低的资源占用（用户要求：不要每时每刻后台运算）。
+     * 无条件调用 reclaimIdle：它仅在真正回收条目时才打日志，空跑零开销零噪音；
+     * 同时能顺带清掉 FTP 会话遗留的 repo=null 空壳条目。
+     */
+    private fun startReclaimLoop() {
+        reclaimJob?.cancel()
+        reclaimJob = scope.launch {
+            while (isActive) {
+                delay(RECLAIM_INTERVAL_MS)
+                AccountManager.reclaimIdle()
+            }
+        }
+    }
+
     private fun shutdownServers(keepForeground: Boolean = false) {
+        // 停止周期空闲回收：服务停止/重启时不再清扫挂载点
+        reclaimJob?.cancel()
+        reclaimJob = null
         httpServers.values.forEach { s ->
             runCatching { s.stop() }.onFailure { LogBus.warn("停止 WebDAV 异常：${it.message}") }
         }
