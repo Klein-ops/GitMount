@@ -341,6 +341,39 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * 删除仓库（不可逆）：从 GitHub 永久删除仓库及其全部文件与提交历史。
+     * 危险操作：调用方必须已通过两道确认弹窗 + 输入完整仓库名校验。
+     * 删除成功后绕过缓存刷新扫描列表，让列表立即移除该仓库。
+     */
+    fun deleteRepo(token: String, owner: String, repo: String, onResult: (Result<String>) -> Unit = {}) {
+        val t = token.trim()
+        val o = owner.trim()
+        val r = repo.trim()
+        if (t.isBlank() || o.isBlank() || r.isBlank()) {
+            onResult(Result.failure(IllegalStateException("令牌或仓库信息不完整")))
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val client = GitHubClient(t)
+                client.deleteRepo(o, r)
+                // 绕过缓存强制刷新列表，让被删仓库立即可见地消失
+                scanCache = null
+                val login = client.getUser()
+                val repos = runCatching { client.listUserRepos() }.getOrElse { emptyList() }
+                scanCache = ScanCache(t, login, repos, System.currentTimeMillis())
+                _scanState.value = ScanState.Success(login, repos)
+                LogBus.warn("仓库 $o/$r 已永久删除")
+                onResult(Result.success("$o/$r"))
+            } catch (e: Exception) {
+                val msg = friendly(e)
+                LogBus.error("删除仓库失败：$msg")
+                onResult(Result.failure(e))
+            }
+        }
+    }
+
     /** 保存服务配置页的表单（服务协议 / 端口 / 访问账号），落盘完成后回调 */
     fun saveServiceConfig(
         mode: ServerMode,

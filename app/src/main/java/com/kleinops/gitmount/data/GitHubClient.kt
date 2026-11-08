@@ -275,6 +275,15 @@ class GitHubClient(private val token: String) {
         )
     }
 
+    /**
+     * 删除仓库（不可逆，永久删除仓库及其全部文件与提交历史）。
+     * 危险操作：仅允许在用户明确输入完整仓库名确认后调用。
+     * DELETE /repos/{owner}/{repo} 成功时返回 204 无响应体。
+     */
+    fun deleteRepo(owner: String, repo: String) {
+        execute(authRequest(url("/repos/$owner/$repo")).delete())
+    }
+
     /** 列出目录内容 */
     fun listDir(owner: String, repo: String, path: String, branch: String): List<GitEntry> {
         val encodedPath = if (path.isEmpty()) "" else "/${encodePath(path)}"
