@@ -1,5 +1,6 @@
 package com.kleinops.gitmount.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -124,8 +125,11 @@ fun MountPointEditScreen(
     var showClearHistoryConfirm by remember(mountPoint?.id) { mutableStateOf(false) }
 
     val effectToken = token.trim().ifBlank { shared }
-    val currentOwner = mountPoint?.owner ?: ""
-    val currentRepo = mountPoint?.repoName ?: ""
+    // 用服务层最新已保存配置作为"当前绑定"展示基准：删除仓库联动解绑等后台操作
+    // 会实时更新配置，这里同步显示（否则编辑页还显示已删除的旧绑定，误导用户）
+    val latestMount = settings.mountPoints.firstOrNull { it.id == mountPoint?.id }
+    val currentOwner = latestMount?.owner?.takeIf { it.isNotBlank() } ?: (mountPoint?.owner ?: "")
+    val currentRepo = latestMount?.repoName?.takeIf { it.isNotBlank() } ?: (mountPoint?.repoName ?: "")
     val currentBinding = bindingRepo?.let { it.fullName }
         ?: if (currentOwner.isNotBlank() && currentRepo.isNotBlank()) "$currentOwner/$currentRepo" else ""
 
@@ -134,6 +138,54 @@ fun MountPointEditScreen(
     val repoName = bindingRepo?.fullName?.substringAfter('/') ?: currentRepo
     val repoBranch = bindingRepo?.defaultBranch ?: (mountPoint?.branch ?: "main")
     val hasRepo = currentBinding.isNotBlank() && !unbind
+
+    // ---- 未保存改动检测：任何字段与初始/保存值不一致，返回时拦截并提示 ----
+    // pendingConfig = 当前表单将要保存的完整配置（与保存按钮共用同一构造）
+    val pendingConfig = MountPointConfig(
+        id = mountPoint?.id ?: "",
+        name = name.trim(),
+        token = token.trim(),
+        owner = bindingRepo?.fullName?.substringBefore('/')
+            ?: if (unbind) "" else currentOwner,
+        repoName = bindingRepo?.fullName?.substringAfter('/')
+            ?: if (unbind) "" else currentRepo,
+        branch = bindingRepo?.defaultBranch
+            ?: if (unbind) "main" else (mountPoint?.branch ?: "main"),
+        mode = mode.name,
+        ftpPort = ftpPort.toIntOrNull() ?: (mountPoint?.ftpPort ?: 2121),
+        webdavPort = webdavPort.toIntOrNull() ?: (mountPoint?.webdavPort ?: 8080),
+        username = username.trim(),
+        password = password,
+        enabled = enabled,
+        loopbackOnly = loopbackOnly,
+    )
+    val dirty = if (mountPoint == null) {
+        // 新建挂载点：有任何非默认输入即视为有改动
+        name.trim().isNotBlank() ||
+            token.trim().isNotBlank() ||
+            bindingRepo != null ||
+            unbind ||
+            mode != ServerMode.WEBDAV ||
+            ftpPort != "2121" ||
+            webdavPort != "8080" ||
+            username.trim().isNotBlank() ||
+            password.isNotBlank() ||
+            loopbackOnly
+    } else {
+        // 以服务层最新已保存配置为基准（删除仓库联动解绑等后台操作会更新配置，
+        // 此时表单与最新配置一致就不算"有未保存改动"，避免误弹放弃确认）
+        val latest = settings.mountPoints.firstOrNull { it.id == mountPoint.id } ?: mountPoint
+        pendingConfig != latest
+    }
+    var confirmDiscard by remember(mountPoint?.id) { mutableStateOf(false) }
+    // 统一出口：有未保存改动先弹确认，否则直接返回
+    fun leave() {
+        if (dirty) confirmDiscard = true else onBack()
+    }
+    // 系统返回键：在选择仓库页时先关仓库选择页；否则走未保存拦截
+    BackHandler {
+        if (showRepoSelect) showRepoSelect = false else leave()
+    }
 
     // 已绑定仓库且令牌有效时自动查询容量（换仓库/换令牌自动重查）
     LaunchedEffect(repoOwner, repoName, effectToken) {
@@ -168,6 +220,13 @@ fun MountPointEditScreen(
                     showRepoSelect = false
                 },
                 onBack = { showRepoSelect = false },
+                onDeletedCurrentRepo = {
+                    // 当前绑定的仓库在列表里被删除了：清空编辑态并标记解绑，
+                    // 让用户回来一眼看到"已选择解绑"，而不是还对着已删除的仓库
+                    bindingRepo = null
+                    unbind = true
+                    vm.clearRepoOpState()
+                },
             )
         } else {
     Scaffold(
@@ -175,7 +234,7 @@ fun MountPointEditScreen(
             TopAppBar(
                 title = { Text(if (isNew) "新建挂载点" else "编辑挂载点") },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = { leave() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 },
@@ -489,23 +548,11 @@ fun MountPointEditScreen(
                 onClick = {
                     val n = name.trim()
                     if (n.isBlank()) return@Button
-                    val base = MountPointConfig(
-                        id = mountPoint?.id ?: "",
+                    // 复用 pendingConfig：与脏检测构造完全一致，避免出现"检测的配置"与
+                    // "保存的配置"不一致（比如将来字段演进时漏改一处）
+                    val base = pendingConfig.copy(
                         name = n,
-                        token = token.trim(),
-                        owner = bindingRepo?.fullName?.substringBefore('/')
-                            ?: if (unbind) "" else currentOwner,
-                        repoName = bindingRepo?.fullName?.substringAfter('/')
-                            ?: if (unbind) "" else currentRepo,
-                        branch = bindingRepo?.defaultBranch
-                            ?: if (unbind) "main" else (mountPoint?.branch ?: "main"),
-                        mode = mode.name,
-                        ftpPort = ftpPort.toIntOrNull() ?: (mountPoint?.ftpPort ?: 2121),
-                        webdavPort = webdavPort.toIntOrNull() ?: (mountPoint?.webdavPort ?: 8080),
-                        username = username.trim(),
-                        password = password,
-                        enabled = enabled,
-                        loopbackOnly = loopbackOnly,
+                        id = mountPoint?.id ?: "",
                     )
                     if (isNew) {
                         vm.createMountPoint(base) {
@@ -540,6 +587,29 @@ fun MountPointEditScreen(
         }
     }
         }
+    }
+
+    if (confirmDiscard) {
+        AlertDialog(
+            onDismissRequest = { confirmDiscard = false },
+            title = { Text(if (isNew) "放弃新建挂载点？" else "放弃修改？") },
+            text = { Text("当前有未保存的修改（仓库绑定 / 令牌 / 服务配置等），退出后将丢失。确定放弃并返回吗？") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        confirmDiscard = false
+                        onBack()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+                ) { Text("放弃修改") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDiscard = false }) { Text("继续编辑") }
+            },
+        )
     }
 
     if (showClearHistoryConfirm) {
@@ -585,6 +655,8 @@ private fun RepoSelectScreen(
     currentBinding: String,
     onPick: (RepoBrief) -> Unit,
     onBack: () -> Unit,
+    /** 删除的仓库恰是当前绑定仓库时，通知外层清空绑定态（删除后联动解绑） */
+    onDeletedCurrentRepo: () -> Unit = {},
 ) {
     val scanState by vm.scanState.collectAsStateWithLifecycle()
     // 「新建仓库」面板（页面内展开，非弹窗）
@@ -885,6 +957,12 @@ private fun RepoSelectScreen(
                                 deleteTarget = null
                                 deleteStep = 0
                                 deleteInput = ""
+                                result.onSuccess {
+                                    // 删除的恰是当前绑定仓库：外层联动清空绑定态并标记解绑
+                                    if (fullName == currentBinding) {
+                                        onDeletedCurrentRepo()
+                                    }
+                                }
                                 result.onFailure {
                                     LogBus.error("删除仓库失败：${it.message}")
                                 }
