@@ -23,8 +23,13 @@ class HttpServer(
     /** 绑定地址；null/0.0.0.0 = 监听所有网卡（局域网），127.0.0.1 = 仅本机 */
     private val bindAddress: String? = null,
     /** 请求体上限：超过时在读 body 之前直接回 413，避免超大上传白白占用内存/带宽
-     *  与 GitRepository.MAX_FILE_SIZE（40MB 本地拦截线）保持一致 */
-    private val maxBodyBytes: Long = 40L * 1000 * 1000,
+     *  与 GitRepository.MAX_LFS_SIZE（2GB 大文件通道上限）保持一致 */
+    private val maxBodyBytes: Long = 2L * 1000 * 1000 * 1000,
+    /** 大请求体落盘目录（WebDAV PUT 大文件时把 body 写临时文件而非读入内存，防 OOM）。
+     *  为 null 时超过 bodySpoolThreshold 的请求体直接回 413。由 MountService 传入应用 cacheDir。 */
+    private val spoolDir: java.io.File? = null,
+    /** 请求体超过该字节数改落盘（避免大上传 OOM）；未配置 spoolDir 时此阈值无效 */
+    private val bodySpoolThreshold: Long = 5L * 1024 * 1024,
 ) {
     private val serverSocket = ServerSocket().apply {
         // 必须显式 reuseAddress：增量同步会"停旧监听→立即用同端口重新 bind"，
@@ -101,8 +106,14 @@ class HttpServer(
                         try {
                             handler(exchange)
                             exchange.writeTo(output)
-                            // 流量打点：请求体=上传，响应体=下载（含目录列表/元数据等）
-                            ServerController.addTraffic(exchange.body.size.toLong(), exchange.bodyBytes.size.toLong())
+                            // 流量打点：请求体=上传，响应体=下载（含目录列表/元数据等）。
+                            // 大文件落盘上传用 contentLength（body 恒空）；流式响应用 Content-Length。
+                            val reqLen = if (exchange.bodyFile != null) exchange.contentLength
+                            else exchange.body.size.toLong()
+                            val respLen = exchange.responseHeaders["Content-Length"]
+                                ?.toLongOrNull()
+                                ?: exchange.bodyBytes.size.toLong()
+                            ServerController.addTraffic(reqLen, respLen)
                         } catch (e: Exception) {
                             // 处理器抛异常时回 500
                             try {
@@ -111,6 +122,12 @@ class HttpServer(
                                 err.bodyBytes = (e.message ?: "Internal Server Error").toByteArray()
                                 err.writeTo(output)
                             } catch (_: IOException) {
+                            }
+                        } finally {
+                            // 大请求体落盘的临时文件用完即删（无论成功失败）
+                            exchange.bodyFile?.let { f ->
+                                runCatching { f.delete() }
+                                exchange.bodyFile = null
                             }
                         }
                         output.flush()
@@ -148,27 +165,61 @@ class HttpServer(
 
         val cl = headers["content-length"]?.toLongOrNull() ?: 0L
         // 关键：在【读取 body 之前】就拦截超大上传。
-        // 超大文件本来就会被 GitRepository.MAX_FILE_SIZE 拒绝，提前在这里挡掉，
-        // 可以完全避免把百 MB 的字节读进内存、也绝不触发 GitHub API 调用。
+        // 超过 2GB LFS 上限直接 413（绝不可能上传成功，提前挡掉）。
         if (cl > maxBodyBytes) {
             throw RequestTooLargeException(maxBodyBytes)
         }
-        val body = if (cl > 0) {
-            // 已通过上限检查（cl <= 100MB < Int.MAX_VALUE），toInt() 安全
-            // 直接按 Content-Length 预分配精确数组并读满，避免 ByteArrayOutputStream
-            // 的 toByteArray() 再复制一份（78MB 上传峰值 = 2×78MB，默认堆必炸）。
-            val bytes = ByteArray(cl.toInt())
-            var offset = 0
-            var remaining = cl
-            while (remaining > 0) {
-                val n = input.read(bytes, offset, minOf(remaining, Int.MAX_VALUE.toLong()).toInt())
-                if (n < 0) throw IOException("eof in body")
-                offset += n
-                remaining -= n
+
+        // 请求体两种承载方式：
+        // 1. 小 body（≤ bodySpoolThreshold 或未配置 spoolDir）：读入内存（保持既有行为，≤5MB 峰值可控）；
+        // 2. 大 body（> bodySpoolThreshold 且有 spoolDir）：流式落盘临时文件，Handler 用
+        //    FileInputStream 读取再直传 GitHub。彻底避免 WebDAV PUT 大文件把几百 MB 读进内存 OOM。
+        val bodyFile: java.io.File?
+        val bodyBytes: ByteArray
+        if (cl > bodySpoolThreshold && spoolDir != null) {
+            if (!spoolDir.exists()) spoolDir.mkdirs()
+            val tmp = java.io.File.createTempFile("gm-body-", ".tmp", spoolDir)
+            try {
+                java.io.FileOutputStream(tmp).use { out ->
+                    val buf = ByteArray(128 * 1024)
+                    var remaining = cl
+                    while (remaining > 0) {
+                        val want = minOf(buf.size.toLong(), remaining).toInt()
+                        val n = input.read(buf, 0, want)
+                        if (n < 0) throw IOException("eof in body")
+                        out.write(buf, 0, n)
+                        remaining -= n
+                    }
+                }
+                bodyFile = tmp
+                bodyBytes = ByteArray(0)
+            } catch (e: Exception) {
+                tmp.delete()
+                throw e
             }
-            bytes
         } else {
-            ByteArray(0)
+            // 没有可用的落盘目录：超过内存承载阈值（bodySpoolThreshold）的直接 413，
+            // 避免 ByteArray(cl.toInt()) 在 cl > Int.MAX_VALUE 时溢出成负数崩溃（NegativeArraySizeException）。
+            if (cl > bodySpoolThreshold) {
+                throw RequestTooLargeException(bodySpoolThreshold)
+            }
+            bodyFile = null
+            bodyBytes = if (cl > 0) {
+                // 已通过上限检查，cl <= maxBodyBytes；但 cl 可能 > Int.MAX_VALUE，需分段读。
+                // 落盘阈值已挡住大 body，这里 cl ≤ bodySpoolThreshold ≤ Int 范围，toInt() 安全。
+                val bytes = ByteArray(cl.toInt())
+                var offset = 0
+                var remaining = cl
+                while (remaining > 0) {
+                    val n = input.read(bytes, offset, minOf(remaining, Int.MAX_VALUE.toLong()).toInt())
+                    if (n < 0) throw IOException("eof in body")
+                    offset += n
+                    remaining -= n
+                }
+                bytes
+            } else {
+                ByteArray(0)
+            }
         }
 
         val decodedPath = try {
@@ -181,7 +232,7 @@ class HttpServer(
         val keepAlive = headers["connection"]?.equals("keep-alive", true) != false
         val chunked = headers["transfer-encoding"]?.contains("chunked", true) == true
 
-        return HttpExchange(method, decodedPath, headers, body, keepAlive, chunked)
+        return HttpExchange(method, decodedPath, headers, bodyBytes, keepAlive, chunked, bodyFile, cl)
     }
 
     private fun readLine(input: InputStream): String? {
@@ -232,10 +283,23 @@ class HttpExchange(
     val keepAlive: Boolean,
     /** 请求体使用 Transfer-Encoding: chunked；本服务器不解析分块体，需由上层拒绝 */
     val chunked: Boolean = false,
+    /**
+     * 大请求体落盘的临时文件（WebDAV PUT 大文件时使用；由 HttpServer 在请求处理后删除）。
+     * 非空时代替 body 承载请求体内容，Handler 用 FileInputStream 流式读取。
+     */
+    var bodyFile: java.io.File? = null,
+    /** 请求体实际字节数（body 或 bodyFile 的内容总长） */
+    var contentLength: Long = 0L,
 ) {
     var status: Int = 200
     var responseHeaders: MutableMap<String, String> = mutableMapOf()
     var bodyBytes: ByteArray = ByteArray(0)
+
+    /**
+     * 流式响应体（供大文件 GET 使用）：非空时优先于 bodyBytes 写出。
+     * 由 HttpServer 在写出后负责关闭；Handler 不要再手动关闭。
+     */
+    var responseStream: java.io.InputStream? = null
 
     fun header(name: String): String? = headers[name.lowercase(Locale.US)]
 
@@ -246,21 +310,42 @@ class HttpExchange(
         bodyBytes = body
     }
 
-    /** 将响应写到输出流 */
+    /** 将响应写到输出流（支持 bodyBytes 与 responseStream 两种模式） */
     fun writeTo(out: OutputStream) {
         val reason = reasonPhrase(status)
         val head = StringBuilder()
         head.append("HTTP/1.1 ").append(status).append(' ').append(reason).append("\r\n")
         responseHeaders.forEach { (k, v) -> head.append(k).append(": ").append(v).append("\r\n") }
         if (responseHeaders["Content-Length"] == null) {
-            head.append("Content-Length: ").append(bodyBytes.size).append("\r\n")
+            val len = responseStream?.available()?.toLong() ?: bodyBytes.size.toLong()
+            head.append("Content-Length: ").append(len).append("\r\n")
         }
         if (responseHeaders["Connection"] == null) {
             head.append("Connection: ").append(if (keepAlive) "keep-alive" else "close").append("\r\n")
         }
         head.append("\r\n")
         out.write(head.toString().toByteArray(StandardCharsets.ISO_8859_1))
-        if (bodyBytes.isNotEmpty()) out.write(bodyBytes)
+        val stream = responseStream
+        if (stream != null) {
+            // 流式响应：128KB 缓冲边读边写；完成后关闭流（释放 OkHttp Response 连接）
+            try {
+                val buf = ByteArray(128 * 1024)
+                while (true) {
+                    val n = stream.read(buf)
+                    if (n < 0) break
+                    out.write(buf, 0, n)
+                }
+                out.flush()
+            } finally {
+                try {
+                    stream.close()
+                } catch (_: IOException) {
+                }
+                responseStream = null
+            }
+        } else if (bodyBytes.isNotEmpty()) {
+            out.write(bodyBytes)
+        }
     }
 
     companion object {

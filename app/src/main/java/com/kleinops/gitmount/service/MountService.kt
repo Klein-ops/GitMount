@@ -192,6 +192,11 @@ class MountService : Service() {
     override fun onCreate() {
         super.onCreate()
         settingsRepo = SettingsRepository(applicationContext)
+        // 大文件上传临时落盘目录：应用 cacheDir 下建子目录（spool 临时文件与 http body 复用）。
+        // FTP 数据连接无总长度 → 先落盘统计字节数；WebDAV PUT 大 body → 先落盘防 OOM。
+        val spool = java.io.File(cacheDir, "gm-spool")
+        runCatching { spool.mkdirs() }
+        MountPointManager.spoolDir = spool
         createChannel()
         registerNetworkCallback()
     }
@@ -477,7 +482,7 @@ class MountService : Service() {
                     repoProvider = { MountPointManager.getRepoBlocking(mountPoint, sharedToken) },
                     authUser = { mountPoint.username to mountPoint.password },
                 )
-                val server = HttpServer(mountPoint.webdavPort, { exchange -> handler.handle(exchange) }, bindAddr)
+                val server = HttpServer(mountPoint.webdavPort, { exchange -> handler.handle(exchange) }, bindAddr, spoolDir = MountPointManager.spoolDir)
                 server.start()
                 httpServers[mountPoint.id] = server
                 MountPointManager.registerPort(server.boundPort)
@@ -598,7 +603,7 @@ class MountService : Service() {
                                     repoProvider = { MountPointManager.getRepoBlocking(mp, shared) },
                                     authUser = credentials,
                                 )
-                                val server = HttpServer(mp.webdavPort, { exchange -> handler.handle(exchange) }, bindAddr)
+                                val server = HttpServer(mp.webdavPort, { exchange -> handler.handle(exchange) }, bindAddr, spoolDir = MountPointManager.spoolDir)
                                 server.start()
                                 httpServers[mp.id] = server
                                 // 登记监听端口：FTP PASV 选数据端口时避让，防止数据端口撞上挂载点监听端口

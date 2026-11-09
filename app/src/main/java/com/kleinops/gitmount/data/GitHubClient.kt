@@ -25,6 +25,15 @@ data class FileMeta(
     val size: Long,
 )
 
+/** Releases 大文件资产元信息（上传成功后返回） */
+data class LfsAsset(
+    val assetId: Long,
+    val size: Long,
+    val fileName: String,
+    /** 上传内容的 SHA-256（流式边传边算，写入指针供下载后完整性比对） */
+    val sha256: String = "",
+)
+
 /** 仓库概要（用于“选择已有仓库”界面） */
 data class RepoBrief(
     val name: String,
@@ -87,6 +96,24 @@ class GitHubClient(private val token: String) {
         .writeTimeout(120, TimeUnit.SECONDS)
         .build()
 
+    /**
+     * 大文件资产下载专用 OkHttp。
+     *
+     * 超时选型的关键认知（v2 修正）：OkHttp 的 readTimeout 语义是【两次读取之间的
+     * 最大间隔】，不是"整个传输的总时长"。旧版设 30s，导致 156MB 大文件在 CDN 慢速
+     * 但持续传输时，任意一次 TCP 读到数据的间隔超过 30s 就被判超时——这正是"下载
+     * 只走了几 KB 就 SocketTimeoutException、且每次几乎同一时间失败"的根因之一。
+     *
+     * 这里放宽到 90s：网络慢但持续有数据时绝不误杀；CDN 真正挂起（超过 90s 无任何
+     * 字节）时仍然主动失败，且远小于全局 client 的 120s，转发线程不会被拖死。
+     * 连接超时保持 15s（建立连接要快，失败早报）。
+     */
+    private val assetClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(90, TimeUnit.SECONDS)
+        .writeTimeout(90, TimeUnit.SECONDS)
+        .build()
+
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
 
     private fun url(path: String): String = "https://api.github.com$path"
@@ -125,6 +152,144 @@ class GitHubClient(private val token: String) {
             JSONObject(body)
         } catch (e: Exception) {
             throw GitHubApiException(502, "GitHub 返回了无法解析的响应")
+        }
+    }
+
+    // ---------- GitHub Releases 通道（大文件 >40MB 走这里，仓库里只留指针） ----------
+
+    /**
+     * 获取 LFS 桶（release）的 numeric id；不存在则创建（draft）。
+     * 每个仓库固定一个 tag 承载全部大文件资产，避免每文件一个 release 的碎片化。
+     * draft release 对外不可见，正好满足"仅本机/局域网访问"的语义。
+     *
+     * 关键经验（2026-11-09 实测）：不能用 GET /releases/tags/{tag} 查桶——GitHub 对
+     * draft release 的该端点恒返回 404（draft 未发布，tag ref 不存在），导致"查不到桶
+     * →每次新建"的桶无限增殖。改为遍历 releases 列表（draft 也包含）按 tag_name 匹配。
+     */
+    fun getOrCreateLfsRelease(
+        owner: String,
+        repo: String,
+        tag: String,
+        title: String = "GitMount LFS 存储桶",
+    ): Long {
+        val existing = findReleaseIdByTag(owner, repo, tag)
+        if (existing > 0) return existing
+        val payload = JSONObject()
+            .put("tag_name", tag)
+            .put("name", title)
+            .put("body", "GitMount 大文件存储桶（GitHub Contents API 单文件上限之外的二进制资产）。请勿手动删除。")
+            .put("draft", true)
+        val body = execute(
+            authRequest(url("/repos/$owner/$repo/releases"))
+                .post(payload.toString().toRequestBody(jsonMedia))
+        )
+        return JSONObject(body).optLong("id", -1L).also {
+            if (it <= 0) throw GitHubApiException(502, "创建 LFS 桶失败")
+        }
+    }
+
+    /** 只读查询 LFS 桶是否已存在（不创建）。作为惰性检查：无大文件的仓库跳过指针解析。 */
+    fun getLfsReleaseIfExists(owner: String, repo: String, tag: String): Long? =
+        findReleaseIdByTag(owner, repo, tag).takeIf { it > 0 }
+
+    /** 遍历 releases 列表（含 draft）按 tag_name 匹配，返回 release id；找不到返回 -1。 */
+    private fun findReleaseIdByTag(owner: String, repo: String, tag: String): Long {
+        for (page in 1..3) {
+            val arr = try {
+                val body = execute(
+                    authRequest(url("/repos/$owner/$repo/releases?per_page=100&page=$page")).get()
+                )
+                JSONArray(body)
+            } catch (e: GitHubApiException) {
+                if (e.code == 404) return -1L else throw e
+            }
+            if (arr.length() == 0) break
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                if (o.optString("tag_name") == tag) {
+                    val id = o.optLong("id", -1L)
+                    if (id > 0) return id
+                }
+            }
+            if (arr.length() < 100) break
+        }
+        return -1L
+    }
+
+    /**
+     * 上传资产到 LFS 桶（流式，已知总长度）。
+     *
+     * 关键约束（2026-11-09 实测）：与 Contents API 一样，uploads.github.com
+     * 拒绝 Transfer-Encoding: chunked，强制要求请求带已知 Content-Length
+     * （否则 400 "Bad Content-Length"）。因此调用方必须先确定总字节数：
+     * WebDAV 用 HTTP Content-Length；FTP 数据连接无长度则先落盘临时文件统计；
+     * 内存字节直接用 size。请求体仍边读边写（流式），只在头部声明固定长度。
+     * 传输过程中边读边算 SHA-256，写入指针文件供下载后完整性比对。
+     */
+    fun uploadLfsAsset(
+        owner: String,
+        repo: String,
+        releaseId: Long,
+        fileName: String,
+        input: java.io.InputStream,
+        maxBytes: Long,
+        totalBytes: Long,
+    ): LfsAsset {
+        val name = java.net.URLEncoder.encode(fileName, "UTF-8").replace("+", "%20")
+        val uploadUrl = "https://uploads.github.com/repos/$owner/$repo/releases/$releaseId/assets?name=$name"
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        val digestInput = java.security.DigestInputStream(input, digest)
+        val body = StreamingRawRequestBody(digestInput, maxBytes, totalBytes)
+        val req = authRequest(uploadUrl)
+            .header("Content-Type", "application/octet-stream")
+            .post(body)
+        val resp = execute(req)
+        val o = JSONObject(resp)
+        val id = o.optLong("id", -1L)
+        if (id <= 0) throw GitHubApiException(502, "上传资产失败：无法解析响应")
+        val sha256 = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+        return LfsAsset(id, o.optLong("size", 0L), o.optString("name", fileName), sha256)
+    }
+
+    /** 删除 LFS 桶内指定资产（与"删指针文件"配合，先删资产避免泄漏） */
+    fun deleteLfsAsset(owner: String, repo: String, assetId: Long) {
+        // OkHttp DELETE 默认会携带 Content-Length: 0，uploads 无 body，成功返回 204
+        execute(authRequest(url("/repos/$owner/$repo/releases/assets/$assetId")).delete())
+    }
+
+    /**
+     * 打开 LFS 资产下载流。
+     *
+     * 长流下载的关键设计（v2 修正）：
+     * 1. 用 assetClient（读超时 90s = 两次读取间隔上限，不是总时长），
+     *    CDN 慢速但持续有数据时绝不误杀，真正挂起时仍能主动失败；
+     * 2. Accept: application/octet-stream 让 GitHub 直接返回二进制体，不走 browser_download_url
+     *    （那会在 302 后多一跳，且私库需要浏览器会话 cookie，API 路径 + token 更可靠）；
+     * 3. 返回的流由调用方负责关闭；close() 同时释放整个 Response，避免连接泄漏。
+     */
+    fun openLfsAssetStream(owner: String, repo: String, assetId: Long): java.io.InputStream {
+        val req = authRequest(url("/repos/$owner/$repo/releases/assets/$assetId"))
+            .header("Accept", "application/octet-stream")
+            .get()
+            .build()
+        val resp = assetClient.newCall(req).execute()
+        if (!resp.isSuccessful) {
+            val msg = extractErrorMessage(resp.body?.string().orEmpty())
+            resp.close()
+            throw GitHubApiException(resp.code, msg)
+        }
+        val body = resp.body ?: run {
+            resp.close()
+            throw GitHubApiException(502, "资产下载响应无内容")
+        }
+        return object : java.io.FilterInputStream(body.byteStream()) {
+            override fun close() {
+                try {
+                    super.close()
+                } finally {
+                    body.close()
+                }
+            }
         }
     }
 
@@ -606,4 +771,56 @@ private class StreamingBase64RequestBody(
     /** 请求体 tail：content 值收尾引号 + 闭合大括号 */
     private fun tailBytes(): ByteArray =
         "\"}".toByteArray(Charsets.UTF_8)
+}
+
+/**
+ * 原始二进制流式 RequestBody（固定 Content-Length）。
+ *
+ * 用于上传 Releases 大文件资产：请求体是原始字节（不是 base64 JSON）。
+ * 关键约束（2026-11-09 实测）：uploads.github.com 拒绝 Transfer-Encoding: chunked，
+ * 必须带已知 Content-Length，因此 contentLength() 返回调用方传入的 totalBytes。
+ *
+ * writeTo 边读 input 边写 sink，不整体驻留内存；input 通常包了 DigestInputStream
+ * 边传边算 SHA-256。读超时（客户端发完数据但未关闭数据连接）按流结束处理。
+ * 超过 maxBytes 立即抛 FileTooLargeException 掐断，避免超大文件白传。
+ */
+private class StreamingRawRequestBody(
+    private val input: java.io.InputStream,
+    /** 本地拦截上限：累计写入超过立即掐断（2GB） */
+    private val maxBytes: Long,
+    /** 数据流总长度：必须与 input 实际字节数一致（GitHub 按此校验，不一致会 400） */
+    private val totalBytes: Long,
+) : RequestBody() {
+
+    override fun contentType(): okhttp3.MediaType? =
+        "application/octet-stream".toMediaType()
+
+    /** 固定长度（GitHub 拒绝 chunked，必须声明已知 Content-Length） */
+    override fun contentLength(): Long = totalBytes
+
+    override fun writeTo(sink: BufferedSink) {
+        val buf = ByteArray(128 * 1024)
+        var written = 0L
+        // 关键：按 totalBytes 精确读满即停，绝不等待 EOF。
+        // HTTP keep-alive 客户端 PUT 发完 body 后保持连接等响应、不会关闭数据流，
+        // 若这里读到 EOF 才停会永久卡死（正是旧版"读超时/卡死"的同类问题）。
+        // FTP spool 场景上游是 FileInputStream，读到 EOF 但 written < totalBytes 表示
+        // 长度不一致，让 OkHttp 写出少于 Content-Length 的字节，GitHub 会以 400 拒绝。
+        while (written < totalBytes) {
+            val want = minOf(buf.size.toLong(), totalBytes - written).toInt()
+            val n = try {
+                input.read(buf, 0, want)
+            } catch (e: java.net.SocketTimeoutException) {
+                // 上游超时（通常只出现在 FTP 场景）：按流结束处理，交给 OkHttp 长度校验
+                break
+            }
+            if (n < 0) break
+            written += n
+            if (written > maxBytes) {
+                // 超出本地拦截线：抛异常让 OkHttp 中止请求，避免把超限数据推给 GitHub
+                throw FileTooLargeException(maxBytes)
+            }
+            sink.write(buf, 0, n)
+        }
+    }
 }
