@@ -378,29 +378,76 @@ class GitHubClient(private val token: String) {
      * 4. 返回的流由调用方负责关闭；close() 同时释放整个 Response，避免连接泄漏。
      */
     fun openLfsAssetStream(owner: String, repo: String, tag: String, pointer: GitRepository.LfsPointer?): java.io.InputStream {
-        // 直链优先：指针携带 fileName 且桶已发布（tag 对应 release 存在）时走浏览器直链
+        // 直链优先：指针携带 fileName 且桶已发布（tag 对应 release 存在）时走浏览器直链。
+        // 私有仓库：直链第一跳必须带认证（github.com 认证通过才 302 到带签名的 CDN URL，
+        // CDN 那跳靠 URL 签名、不需要再认证）。github.com 网页端点对 Bearer 兼容性弱于
+        // API 网关，因此按 Bearer → token → Basic(x-access-token) 顺序尝试，401/403 换下一种，
+        // 全部失败才 fallback 到 API 资产端点（保证私有仓库一定能下）。
         if (pointer != null && pointer.fileName.isNotBlank()) {
             val fileNameEnc = java.net.URLEncoder.encode(pointer.fileName, "UTF-8").replace("+", "%20")
             val directUrl = "https://github.com/$owner/$repo/releases/download/$tag/$fileNameEnc"
-            try {
-                LogBus.info("LFS 下载直链：$directUrl")
-                return openStreamInternal(directUrl)
-            } catch (e: Exception) {
-                LogBus.warn("LFS 直链下载失败（${e.message}），fallback 到 API 资产通道")
+            var authTried = listOf<DirectAuthMode>()
+            for (auth in listOf(DirectAuthMode.BEARER, DirectAuthMode.TOKEN, DirectAuthMode.BASIC)) {
+                authTried = authTried + auth
+                try {
+                    LogBus.info("LFS 下载直链（$auth）：$directUrl")
+                    return openStreamInternal(directUrl, authMode = auth, forceOctetStream = true)
+                } catch (e: GitHubApiException) {
+                    if (e.code == 401 || e.code == 403) {
+                        LogBus.warn("直链 $auth 认证被拒（${e.code}），换下一种认证…")
+                        continue
+                    }
+                    LogBus.warn("直链 $auth 下载失败（${e.message}），fallback 到 API 资产通道")
+                    break
+                } catch (e: Exception) {
+                    LogBus.warn("直链 $auth 下载异常（${e.message}），fallback 到 API 资产通道")
+                    break
+                }
             }
+            LogBus.info("直链认证均不可用（尝试 $authTried），fallback API 通道")
         }
         if (pointer == null || pointer.assetId <= 0) {
             throw GitHubApiException(502, "LFS 指针无效：无资产 ID")
         }
         LogBus.info("LFS 下载 API 通道：asset ${pointer.assetId}")
         val apiUrl = url("/repos/$owner/$repo/releases/assets/${pointer.assetId}")
-        return openStreamInternal(apiUrl, forceOctetStream = true)
+        return openStreamInternal(apiUrl, authMode = DirectAuthMode.BEARER, forceOctetStream = true)
     }
 
-    /** 执行 GET 并返回响应流；forceOctetStream 时声明 Accept: octet-stream（API 通道需要） */
-    private fun openStreamInternal(downloadUrl: String, forceOctetStream: Boolean = false): java.io.InputStream {
-        val builder = authRequest(downloadUrl).get()
-        if (forceOctetStream) builder.header("Accept", "application/octet-stream")
+    /** 直链认证模式：github.com 网页端点对三种格式的兼容性依次递减，401/403 换下一种 */
+    private enum class DirectAuthMode { BEARER, TOKEN, BASIC }
+
+    /**
+     * 生成对应认证模式的 Authorization header 值。
+     * BASIC 用 x-access-token 作为用户名（GitHub git 操作同款机制），无需真实用户名。
+     * 注意：token 是实例属性，必须在这里（实例方法内）访问，嵌套 enum 访问不到。
+     */
+    private fun authHeaderValue(mode: DirectAuthMode): String = when (mode) {
+        DirectAuthMode.BEARER -> "Bearer $token"
+        DirectAuthMode.TOKEN -> "token $token"
+        DirectAuthMode.BASIC ->
+            "Basic " + java.util.Base64.getEncoder().encodeToString("x-access-token:$token".toByteArray())
+    }
+
+    /**
+     * 执行 GET 并返回响应流。
+     * @param authMode 认证方式；API 通道用 BEARER，直链按序尝试三种。
+     * @param forceOctetStream true 时声明 Accept: application/octet-stream（下载二进制必需）。
+     */
+    private fun openStreamInternal(
+        downloadUrl: String,
+        authMode: DirectAuthMode,
+        forceOctetStream: Boolean = false,
+    ): java.io.InputStream {
+        val builder = Request.Builder()
+            .url(downloadUrl)
+            .addHeader("Authorization", authHeaderValue(authMode))
+        if (forceOctetStream) {
+            builder.header("Accept", "application/octet-stream")
+        } else {
+            builder.header("Accept", "application/vnd.github+json")
+        }
+        builder.header("X-GitHub-Api-Version", "2022-11-28")
         val resp = assetClient.newCall(builder.build()).execute()
         if (!resp.isSuccessful) {
             val msg = extractErrorMessage(resp.body?.string().orEmpty())
