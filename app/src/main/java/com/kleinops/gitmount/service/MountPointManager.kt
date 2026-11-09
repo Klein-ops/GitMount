@@ -60,7 +60,7 @@ object MountPointManager {
             entry.activeOps++
             try {
                 val token = mountPoint.effectiveToken(sharedToken)
-                val repo = GitRepository(GitHubClient(token), mountPoint.owner, mountPoint.repoName, mountPoint.branch, spoolDir)
+                val repo = GitRepository(GitHubClient(token, spoolDir), mountPoint.owner, mountPoint.repoName, mountPoint.branch, spoolDir)
                 // 迁移旧版 draft LFS 桶为发布态（下载直链的前提）；失败不阻断挂载
                 repo.publishLfsReleaseIfDraft()
                 repo.visibleList("/") // 连通性探测：确保仓库真实可读

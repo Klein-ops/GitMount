@@ -89,7 +89,25 @@ data class RepoInfo(
  * 覆盖本应用需要的全部操作：校验 token、创建私有仓库、列目录、读写删文件、目录建占位文件。
  * 全部使用同步调用，由调用方调度到 IO 线程。
  */
-class GitHubClient(private val token: String) {
+class GitHubClient(
+    private val token: String,
+    /**
+     * 大文件分片下载临时落盘目录。
+     * 由 MountService/MountPointManager 传入应用 cacheDir；为 null 时大文件走
+     * 单连接流式下载（慢速 CDN 下可能触发规律性超时），有目录则启用 32 线程
+     * Range 并发分片（多连接并行绕开单连接限速 + 分片独立重试）。
+     */
+    private val spoolDir: java.io.File? = null,
+) {
+
+    /** 超过该字节数的 LFS 资产启用分片并行下载（≤ 阈值走单流，避免小文件分片开销） */
+    private val PARALLEL_MIN_BYTES = 8L * 1024 * 1024
+    /** 分片并发上限（32 线程） */
+    private val PARALLEL_MAX = 32
+    /** 单个分片的理想大小（片数 = size / CHUNK，最多 32） */
+    private val PARALLEL_CHUNK = 4L * 1024 * 1024
+    /** 单分片失败重试次数（含首次） */
+    private val PARALLEL_RETRY = 3
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -113,6 +131,12 @@ class GitHubClient(private val token: String) {
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(90, TimeUnit.SECONDS)
         .writeTimeout(90, TimeUnit.SECONDS)
+        // 关键：分片下载要真正并行，必须放宽每主机并发上限（OkHttp 默认 maxRequestsPerHost=5，
+        // 32 线程分片若只有 5 个连接在跑会全部排队，提速归零）
+        .dispatcher(okhttp3.Dispatcher().apply {
+            maxRequests = 64
+            maxRequestsPerHost = 32
+        })
         .build()
 
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
@@ -378,6 +402,18 @@ class GitHubClient(private val token: String) {
      * 4. 返回的流由调用方负责关闭；close() 同时释放整个 Response，避免连接泄漏。
      */
     fun openLfsAssetStream(owner: String, repo: String, tag: String, pointer: GitRepository.LfsPointer?): java.io.InputStream {
+        // 大文件 + 配置了临时目录 → 32 线程 Range 分片并行下载（绕开单连接限速规律性停滞 +
+        // 分片独立重试）；否则走单连接流式（原直链三重认证 + API fallback 逻辑）。
+        // 小文件分片收益为负（多连接开销 > 速度提升），保持单流。
+        if (pointer != null && pointer.size >= PARALLEL_MIN_BYTES && spoolDir != null) {
+            LogBus.info("LFS 大文件启用分片并行下载：${pointer.size} 字节（上限 ${PARALLEL_MAX} 线程）")
+            return openLfsParallel(owner, repo, tag, pointer)
+        }
+        return openLfsSingle(owner, repo, tag, pointer)
+    }
+
+    /** 单连接流式下载（v2 直链三重认证 + API fallback，原逻辑） */
+    private fun openLfsSingle(owner: String, repo: String, tag: String, pointer: GitRepository.LfsPointer?): java.io.InputStream {
         // 直链优先：指针携带 fileName 且桶已发布（tag 对应 release 存在）时走浏览器直链。
         // 私有仓库：直链第一跳必须带认证（github.com 认证通过才 302 到带签名的 CDN URL，
         // CDN 那跳靠 URL 签名、不需要再认证）。github.com 网页端点对 Bearer 兼容性弱于
@@ -412,6 +448,210 @@ class GitHubClient(private val token: String) {
         LogBus.info("LFS 下载 API 通道：asset ${pointer.assetId}")
         val apiUrl = url("/repos/$owner/$repo/releases/assets/${pointer.assetId}")
         return openStreamInternal(apiUrl, authMode = DirectAuthMode.BEARER, forceOctetStream = true)
+    }
+
+    /**
+     * 解析 LFS 资产的下载站点（URL + 认证模式 + 是否支持 Range），供分片并行下载复用。
+     * 直链优先（fileName 非空）：按 Bearer → token → Basic 顺序探测，
+     * 探测用 GET + Range: bytes=0-0——一次同时验证认证与 Range 支持
+     * （206 = 支持分片；200 = 站点存在但不支持 Range；401/403 换下一种认证）。
+     * 直链全部不可用或无 fileName → fallback API 资产端点（BEARER）。
+     * @return null 表示指针无效（无资产 ID 且无 fileName）
+     */
+    private fun resolveLfsSite(
+        owner: String,
+        repo: String,
+        tag: String,
+        pointer: GitRepository.LfsPointer,
+    ): Triple<String, DirectAuthMode, Boolean>? {
+        if (pointer.fileName.isNotBlank()) {
+            val fileNameEnc = java.net.URLEncoder.encode(pointer.fileName, "UTF-8").replace("+", "%20")
+            val directUrl = "https://github.com/$owner/$repo/releases/download/$tag/$fileNameEnc"
+            for (auth in listOf(DirectAuthMode.BEARER, DirectAuthMode.TOKEN, DirectAuthMode.BASIC)) {
+                try {
+                    when (probeRange(directUrl, auth)) {
+                        RangeProbe.OK -> {
+                            LogBus.info("LFS 下载直链（$auth）：$directUrl（Range 可用）")
+                            return Triple(directUrl, auth, true)
+                        }
+                        RangeProbe.UNAUTHORIZED -> {
+                            LogBus.warn("直链 $auth 认证被拒（401/403），换下一种认证…")
+                            continue
+                        }
+                        RangeProbe.NO_RANGE -> {
+                            // 站点存在但不支持 Range：退化为单片（仍比 API 网关快）
+                            LogBus.warn("直链 $auth 不支持 Range，退化为单流下载")
+                            return Triple(directUrl, auth, false)
+                        }
+                    }
+                } catch (e: Exception) {
+                    LogBus.warn("直链 $auth 探测异常（${e.message}），换下一种认证…")
+                }
+            }
+            LogBus.info("直链认证均不可用，fallback API 通道")
+        }
+        if (pointer.assetId <= 0) return null
+        val apiUrl = url("/repos/$owner/$repo/releases/assets/${pointer.assetId}")
+        LogBus.info("LFS 下载 API 通道：asset ${pointer.assetId}")
+        // API 资产端点同样探测 Range 支持：206 → 可分片；200/异常 → 降级单流
+        // （GitHub API 对资产下载可能直接 200 全文，分片请求会拿不到 206 而误判失败）
+        return try {
+            when (probeRange(apiUrl, DirectAuthMode.BEARER)) {
+                RangeProbe.OK -> Triple(apiUrl, DirectAuthMode.BEARER, true)
+                RangeProbe.NO_RANGE -> {
+                    LogBus.warn("API 通道不支持 Range，退化为单流下载")
+                    Triple(apiUrl, DirectAuthMode.BEARER, false)
+                }
+                RangeProbe.UNAUTHORIZED -> {
+                    LogBus.warn("API 通道认证被拒（401/403），退化为单流（由 openStreamInternal 报错误）")
+                    Triple(apiUrl, DirectAuthMode.BEARER, false)
+                }
+            }
+        } catch (e: Exception) {
+            LogBus.warn("API 通道 Range 探测异常（${e.message}），退化为单流下载")
+            Triple(apiUrl, DirectAuthMode.BEARER, false)
+        }
+    }
+
+    /** Range 探测结果 */
+    private enum class RangeProbe { OK, UNAUTHORIZED, NO_RANGE }
+
+    /**
+     * 探测站点可用性与 Range 支持：GET + Range: bytes=0-0。
+     * 206 = 支持分片；401/403 = 认证失败；200 = 忽略 Range（不支持分片）；
+     * 其他非 2xx = 站点不可用（404 等），抛异常由调用方决定换认证/fallback。
+     */
+    private fun probeRange(downloadUrl: String, authMode: DirectAuthMode): RangeProbe {
+        val builder = Request.Builder()
+            .url(downloadUrl)
+            .addHeader("Authorization", authHeaderValue(authMode))
+            .addHeader("Accept", "application/octet-stream")
+            .addHeader("Range", "bytes=0-0")
+        builder.header("X-GitHub-Api-Version", "2022-11-28")
+        val resp = assetClient.newCall(builder.build()).execute()
+        try {
+            return when {
+                resp.code == 206 -> RangeProbe.OK
+                resp.code == 401 || resp.code == 403 -> RangeProbe.UNAUTHORIZED
+                resp.code == 200 -> RangeProbe.NO_RANGE
+                else -> throw GitHubApiException(resp.code, extractErrorMessage(resp.body?.string().orEmpty()))
+            }
+        } finally {
+            resp.close()
+        }
+    }
+
+    /**
+     * 32 线程 Range 分片并行下载（边下边吐），返回按序读取的组合流。
+     * 每个分片独立下载到临时文件、独立重试（PARALLEL_RETRY 次）、由 Future 管理；
+     * 读流按序消费：切到第 i 片时先等该片下载完成，再顺序读出（不会读到半截数据）。
+     * 首片刻意取小（256KB）保证客户端数据连接首字节延迟极小；
+     * 多连接并行绕开单连接限速规律性停滞；close() 关闭流、删除全部临时文件并回收线程池。
+     */
+    private fun openLfsParallel(
+        owner: String,
+        repo: String,
+        tag: String,
+        pointer: GitRepository.LfsPointer,
+    ): java.io.InputStream {
+        val site = resolveLfsSite(owner, repo, tag, pointer)
+            ?: throw GitHubApiException(502, "LFS 指针无效：无资产 ID")
+        val (baseUrl, authMode, rangeOk) = site
+        if (!rangeOk) {
+            // 站点不支持 Range：分片无意义，退化为单流（直链认证已探测通过）
+            LogBus.info("LFS 站点不支持 Range，退化为单流下载")
+            return openStreamInternal(baseUrl, authMode = authMode, forceOctetStream = true)
+        }
+        val dir = spoolDir
+            ?: throw IOException("分片下载需要临时目录")
+        if (!dir.exists()) dir.mkdirs()
+        val total = pointer.size
+        // 首片 256KB（快速出首字节），其余按 PARALLEL_CHUNK 均分，总片数最多 PARALLEL_MAX
+        val HEAD = 256 * 1024L
+        val bodyStart = minOf(HEAD, total)
+        val bodyLen = total - bodyStart
+        val bodyParts = if (bodyLen > 0) {
+            ((bodyLen + PARALLEL_CHUNK - 1) / PARALLEL_CHUNK).coerceIn(1, (PARALLEL_MAX - 1).toLong())
+        } else 0L
+        val parts = 1 + bodyParts.toInt()
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(minOf(parts, PARALLEL_MAX))
+        val fileByPart = (0 until parts).map { part ->
+            java.io.File.createTempFile("gm-dl-$part-", ".part", dir)
+        }
+        val seg = if (bodyParts > 0) bodyLen / bodyParts else 0L
+        // 每个分片的 [start, end] 闭区间
+        fun rangeOf(part: Int): Pair<Long, Long> = when {
+            part == 0 -> 0L to (bodyStart - 1).coerceAtLeast(0)
+            part == parts - 1 -> (bodyStart + (part - 1) * seg) to (total - 1)
+            else -> (bodyStart + (part - 1) * seg) to (bodyStart + part * seg - 1)
+        }
+        val futures = (0 until parts).map { part ->
+            val (start, end) = rangeOf(part)
+            val out = fileByPart[part]
+            pool.submit(java.util.concurrent.Callable {
+                var attempt = 0
+                var lastErr: Exception? = null
+                while (attempt < PARALLEL_RETRY) {
+                    attempt++
+                    try {
+                        downloadRange(baseUrl, authMode, start, end, out)
+                        lastErr = null
+                        break
+                    } catch (e: Exception) {
+                        lastErr = e
+                        if (attempt < PARALLEL_RETRY) {
+                            LogBus.warn("LFS 分片 $part（$start-$end）第 $attempt 次失败（${e.message}），重试…")
+                        }
+                    }
+                }
+                if (lastErr != null) {
+                    throw IOException("LFS 分片 $part（$start-$end）下载失败：${lastErr.message}", lastErr)
+                }
+                Unit
+            })
+        }
+        LogBus.info("LFS 分片下载启动：$total 字节 → $parts 片并发（首片 $HEAD 字节）")
+        return SequentialPartsStream(fileByPart, futures, pool)
+    }
+
+    /** 下载 [start,end] 区间到分片文件（独立文件，从 offset 0 写入；带头认证 + Range，206 校验） */
+    private fun downloadRange(
+        baseUrl: String,
+        authMode: DirectAuthMode,
+        start: Long,
+        end: Long,
+        out: java.io.File,
+    ) {
+        val builder = Request.Builder()
+            .url(baseUrl)
+            .addHeader("Authorization", authHeaderValue(authMode))
+            .addHeader("Accept", "application/octet-stream")
+            .addHeader("Range", "bytes=$start-$end")
+        builder.header("X-GitHub-Api-Version", "2022-11-28")
+        val resp = assetClient.newCall(builder.build()).execute()
+        try {
+            if (resp.code != 206) {
+                throw GitHubApiException(resp.code, extractErrorMessage(resp.body?.string().orEmpty()))
+            }
+            val body = resp.body ?: throw GitHubApiException(502, "分片响应无内容")
+            java.io.FileOutputStream(out).use { fos ->
+                val src = body.byteStream()
+                val buf = ByteArray(128 * 1024)
+                var written = 0L
+                val expected = end - start + 1
+                while (written < expected) {
+                    val n = src.read(buf)
+                    if (n < 0) break
+                    fos.write(buf, 0, n)
+                    written += n
+                }
+                if (written != expected) {
+                    throw IOException("LFS 分片 $start-$end 只收到 $written/$expected 字节")
+                }
+            }
+        } finally {
+            resp.close()
+        }
     }
 
     /** 直链认证模式：github.com 网页端点对三种格式的兼容性依次递减，401/403 换下一种 */
@@ -997,6 +1237,74 @@ private class StreamingRawRequestBody(
                 throw FileTooLargeException(maxBytes)
             }
             sink.write(buf, 0, n)
+        }
+    }
+
+    /**
+     * 组合分片流：按序读取多个分片文件。
+     * 切到第 i 片时先等待该片下载 Future 完成（抛异常则传播为 IOException），
+     * 再顺序读出该片全部字节，保证客户端永远读不到半截分片。
+     * close() 关闭当前流、删除全部临时文件并中断线程池剩余任务。
+     */
+    private class SequentialPartsStream(
+        private val files: List<java.io.File>,
+        private val futures: List<java.util.concurrent.Future<*>>,
+        private val pool: java.util.concurrent.ExecutorService,
+    ) : java.io.InputStream() {
+        private var index = 0
+        private var current: java.io.InputStream? = null
+        private var closed = false
+
+        private fun awaitPart(i: Int) {
+            try {
+                futures[i].get()
+            } catch (e: java.util.concurrent.ExecutionException) {
+                throw (e.cause as? IOException) ?: IOException("LFS 分片 $i 下载失败：${e.cause?.message}", e.cause)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw IOException("LFS 分片 $i 下载被中断", e)
+            }
+        }
+
+        override fun read(): Int {
+            val b = ByteArray(1)
+            val n = read(b, 0, 1)
+            return if (n < 0) -1 else b[0].toInt() and 0xFF
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            if (closed) throw IOException("流已关闭")
+            if (len == 0) return 0
+            while (true) {
+                if (index >= files.size) return -1
+                val stream = current
+                if (stream == null) {
+                    awaitPart(index)
+                    current = java.io.FileInputStream(files[index])
+                    continue
+                }
+                val n = stream.read(b, off, len)
+                if (n >= 0) return n
+                // 当前片读完：切下一片
+                stream.close()
+                current = null
+                index++
+            }
+        }
+
+        override fun close() {
+            if (closed) return
+            closed = true
+            try {
+                current?.close()
+            } catch (_: Exception) {
+            } finally {
+                current = null
+            }
+            pool.shutdownNow()
+            files.forEach { file ->
+                runCatching { file.delete() }
+            }
         }
     }
 }
