@@ -88,6 +88,9 @@ class GitRepository(
         val size: Long,
         val sha256: String,
         val uploadedAt: Long,
+        /** 资产文件名（直链下载需要：github.com/.../releases/download/{tag}/{file}）；
+         * 旧版指针无此字段，解析后为 ""，下载自动 fallback 到 API 通道。 */
+        val fileName: String = "",
     ) {
         fun toText(): String = buildString {
             appendLine(LFS_MAGIC)
@@ -95,6 +98,7 @@ class GitRepository(
             append("size=").append(size).append('\n')
             append("sha256=").append(sha256).append('\n')
             append("uploaded_at=").append(uploadedAt).append('\n')
+            append("file_name=").append(fileName).append('\n')
         }
 
         companion object {
@@ -105,6 +109,7 @@ class GitRepository(
                 var size = -1L
                 var sha256 = ""
                 var uploadedAt = 0L
+                var fileName = ""
                 for (line in lines.drop(1)) {
                     val idx = line.indexOf('=')
                     if (idx <= 0) continue
@@ -115,10 +120,11 @@ class GitRepository(
                         "size" -> size = value.toLongOrNull() ?: -1L
                         "sha256" -> sha256 = value.trim()
                         "uploaded_at" -> uploadedAt = value.toLongOrNull() ?: 0L
+                        "file_name" -> fileName = value.trim()
                     }
                 }
                 if (assetId <= 0 || size < 0) return null
-                return LfsPointer(assetId, size, sha256, uploadedAt)
+                return LfsPointer(assetId, size, sha256, uploadedAt, fileName)
             }
         }
     }
@@ -289,6 +295,18 @@ class GitRepository(
     }
 
     /**
+     * 迁移旧版 draft LFS 桶为发布态（下载直链的前提）。
+     * 挂载激活时由 MountPointManager 调用；内部吞掉全部异常，失败不影响挂载。
+     */
+    fun publishLfsReleaseIfDraft() {
+        try {
+            client.publishLfsReleaseIfDraft(owner, repo, LFS_RELEASE_TAG)
+        } catch (e: Exception) {
+            LogBus.warn("LFS 桶发布迁移失败（忽略，API 通道仍可用）：${e.message}")
+        }
+    }
+
+    /**
      * 读取指针文件内容并尝试解析为 LFS 指针；结果（含 null=非指针）缓存到 pointerCache。
      * 只对 ≤ POINTER_MAX_BYTES 的小文件尝试解析（指针必然极小）。
      */
@@ -338,7 +356,7 @@ class GitRepository(
         val pointer = tryReadPointer(norm)
         if (pointer != null) {
             LogBus.info("LFS 下载开始：$norm ← release asset ${pointer.assetId}（${pointer.size} 字节）")
-            return client.openLfsAssetStream(owner, repo, pointer.assetId)
+            return client.openLfsAssetStream(owner, repo, LFS_RELEASE_TAG, pointer)
         }
         return java.io.ByteArrayInputStream(read(norm))
     }
@@ -493,7 +511,7 @@ class GitRepository(
                     owner, repo, releaseId, newLfsAssetName(),
                     data.inputStream(), MAX_LFS_SIZE, data.size.toLong(),
                 )
-                val ptr = LfsPointer(asset.assetId, asset.size, asset.sha256, System.currentTimeMillis())
+                val ptr = LfsPointer(asset.assetId, asset.size, asset.sha256, System.currentTimeMillis(), asset.fileName)
                 writePointerFile(norm, ptr, existing?.sha, commitMessage)
             } else {
                 writeContents(norm, data, existing, commitMessage)
@@ -594,7 +612,7 @@ class GitRepository(
         deleteOldAssetIfAny(norm)
         val releaseId = ensureLfsRelease()
         val asset = client.uploadLfsAsset(owner, repo, releaseId, newLfsAssetName(), input, MAX_LFS_SIZE, totalBytes)
-        val ptr = LfsPointer(asset.assetId, asset.size, asset.sha256, System.currentTimeMillis())
+        val ptr = LfsPointer(asset.assetId, asset.size, asset.sha256, System.currentTimeMillis(), asset.fileName)
         return writePointerFile(norm, ptr, existing?.sha, commitMessage)
     }
 
@@ -884,13 +902,13 @@ class GitRepository(
                     val existing = client.getFileMeta(owner, repo, toGitPath(to), branch)
                     if (existing != null) throw IOException("目标已存在：$to")
                     val releaseId = ensureLfsRelease()
-                    val src = client.openLfsAssetStream(owner, repo, pointer.assetId)
+                    val src = client.openLfsAssetStream(owner, repo, LFS_RELEASE_TAG, pointer)
                     val asset = try {
                         client.uploadLfsAsset(owner, repo, releaseId, newLfsAssetName(), src, MAX_LFS_SIZE, pointer.size)
                     } finally {
                         src.close()
                     }
-                    val newPtr = LfsPointer(asset.assetId, asset.size, asset.sha256, System.currentTimeMillis())
+                    val newPtr = LfsPointer(asset.assetId, asset.size, asset.sha256, System.currentTimeMillis(), asset.fileName)
                     writePointerFile(to, newPtr, null, "复制 ${node.name}")
                 } finally {
                     writeLock.unlock()

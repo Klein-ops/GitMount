@@ -1,6 +1,7 @@
 package com.kleinops.gitmount.data
 
 import android.util.Base64
+import com.kleinops.gitmount.service.LogBus
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import okhttp3.MediaType.Companion.toMediaType
@@ -158,13 +159,17 @@ class GitHubClient(private val token: String) {
     // ---------- GitHub Releases 通道（大文件 >40MB 走这里，仓库里只留指针） ----------
 
     /**
-     * 获取 LFS 桶（release）的 numeric id；不存在则创建（draft）。
+     * 获取 LFS 桶（release）的 numeric id；不存在则创建。
      * 每个仓库固定一个 tag 承载全部大文件资产，避免每文件一个 release 的碎片化。
-     * draft release 对外不可见，正好满足"仅本机/局域网访问"的语义。
      *
-     * 关键经验（2026-11-09 实测）：不能用 GET /releases/tags/{tag} 查桶——GitHub 对
-     * draft release 的该端点恒返回 404（draft 未发布，tag ref 不存在），导致"查不到桶
-     * →每次新建"的桶无限增殖。改为遍历 releases 列表（draft 也包含）按 tag_name 匹配。
+     * 关键演进（2026-11-09 二修）：桶必须为【已发布】release——下载已改走
+     * GitHub Releases 浏览器直链（github.com/{owner}/{repo}/releases/download/{tag}/{file}），
+     * draft release 无直链（恒 404）。因此创建时 draft=false（发布态）。
+     * 旧版创建的 draft 桶由 publishLfsReleaseIfDraft() 在挂载启动时迁移发布。
+     *
+     * 历史经验备注：不能用 GET /releases/tags/{tag} 查桶——GitHub 对 draft release
+     * 的该端点恒返回 404，导致"查不到桶→每次新建"的桶无限增殖；改为遍历 releases
+     * 列表（含 publish 与 draft）按 tag_name 匹配。
      */
     fun getOrCreateLfsRelease(
         owner: String,
@@ -178,13 +183,38 @@ class GitHubClient(private val token: String) {
             .put("tag_name", tag)
             .put("name", title)
             .put("body", "GitMount 大文件存储桶（GitHub Contents API 单文件上限之外的二进制资产）。请勿手动删除。")
-            .put("draft", true)
+            .put("draft", false)
+            .put("make_latest", false)
         val body = execute(
             authRequest(url("/repos/$owner/$repo/releases"))
                 .post(payload.toString().toRequestBody(jsonMedia))
         )
         return JSONObject(body).optLong("id", -1L).also {
             if (it <= 0) throw GitHubApiException(502, "创建 LFS 桶失败")
+        }
+    }
+
+    /**
+     * 迁移旧版创建的 draft LFS 桶为发布态（下载直链的前提）。
+     * 幂等：桶不存在、已是发布态时静默跳过。
+     * 迁移失败不阻断挂载——fallback 的 API 下载路径仍可用。
+     */
+    fun publishLfsReleaseIfDraft(owner: String, repo: String, tag: String) {
+        try {
+            val id = findReleaseIdByTag(owner, repo, tag)
+            if (id <= 0) return
+            val o = JSONObject(
+                execute(authRequest(url("/repos/$owner/$repo/releases/$id")).get())
+            )
+            if (o.optBoolean("draft", false)) {
+                LogBus.info("迁移 LFS 桶 $tag（id=$id）为发布态，启用下载直链")
+                execute(
+                    authRequest(url("/repos/$owner/$repo/releases/$id"))
+                        .method("PATCH", JSONObject().put("draft", false).toString().toRequestBody(jsonMedia))
+                )
+            }
+        } catch (e: Exception) {
+            LogBus.warn("LFS 桶发布迁移失败（忽略，API 通道仍可用）：${e.message}")
         }
     }
 
@@ -217,6 +247,39 @@ class GitHubClient(private val token: String) {
     }
 
     /**
+     * 列出 LFS 桶内全部资产（name -> LfsAsset 映射）。
+     * GitHub Releases 资产列表接口分页返回（per_page=100），逐个翻页直到取完。
+     */
+    fun listLfsAssets(owner: String, repo: String, releaseId: Long): Map<String, LfsAsset> {
+        val result = LinkedHashMap<String, LfsAsset>()
+        for (page in 1..10) {
+            val body = execute(
+                authRequest(url("/repos/$owner/$repo/releases/$releaseId/assets?per_page=100&page=$page")).get()
+            )
+            val arr = JSONArray(body)
+            if (arr.length() == 0) break
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val id = o.optLong("id", -1L)
+                val name = o.optString("name", "")
+                if (id > 0 && name.isNotEmpty()) {
+                    result[name] = LfsAsset(id, o.optLong("size", 0L), name)
+                }
+            }
+            if (arr.length() < 100) break
+        }
+        return result
+    }
+
+    /** 按资产名在桶内查找（上传幂等确认用）。找不到返回 null。 */
+    fun findLfsAssetByName(
+        owner: String,
+        repo: String,
+        releaseId: Long,
+        fileName: String,
+    ): LfsAsset? = listLfsAssets(owner, repo, releaseId)[fileName]
+
+    /**
      * 上传资产到 LFS 桶（流式，已知总长度）。
      *
      * 关键约束（2026-11-09 实测）：与 Contents API 一样，uploads.github.com
@@ -225,6 +288,11 @@ class GitHubClient(private val token: String) {
      * WebDAV 用 HTTP Content-Length；FTP 数据连接无长度则先落盘临时文件统计；
      * 内存字节直接用 size。请求体仍边读边写（流式），只在头部声明固定长度。
      * 传输过程中边读边算 SHA-256，写入指针文件供下载后完整性比对。
+     *
+     * 幂等确认（2026-11-09 二修）：实测上传 body 已完整送达、资产已创建，但读
+     * uploads.github.com 的响应体超时（SocketTimeoutException）——若直接判失败，
+     * 指针不写、客户端看不到文件（表现为"上传成功但没成功标志，要再扫列表才出现"）。
+     * 因此读响应超时/失败后，转"按资产名查桶"幂等确认：找到即视为成功。
      */
     fun uploadLfsAsset(
         owner: String,
@@ -243,8 +311,43 @@ class GitHubClient(private val token: String) {
         val req = authRequest(uploadUrl)
             .header("Content-Type", "application/octet-stream")
             .post(body)
-        val resp = execute(req)
-        val o = JSONObject(resp)
+            .build()
+        val respBody = try {
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    val msg = extractErrorMessage(resp.body?.string().orEmpty())
+                    throw GitHubApiException(resp.code, msg)
+                }
+                resp.body?.string().orEmpty()
+            }
+        } catch (e: java.net.SocketTimeoutException) {
+            // 上传 body 可能已送达、响应被吞：先幂等确认再决定抛错与否。
+            // 用 size 与 totalBytes 严格比对：写阶段超时（body 未传完）时资产 size 必然
+            // 不匹配 → 仍报失败；读响应超时（body 已完整送达）时 size 匹配 → 视为成功。
+            LogBus.warn("上传响应超时（${e.message}），按资产名幂等确认…")
+            val found = findLfsAssetByName(owner, repo, releaseId, fileName)
+            if (found != null && found.size == totalBytes) {
+                val sha = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+                LogBus.info("幂等确认成功：资产 $fileName（${found.size} 字节）已完整创建，视为上传成功")
+                return found.copy(sha256 = sha)
+            }
+            LogBus.warn("幂等确认未找到完整资产 $fileName（size=${found?.size}, 期望=$totalBytes），按上传失败处理")
+            throw GitHubApiException(504, "上传超时且资产未确认，请重试（$fileName）")
+        } catch (e: IOException) {
+            // GitHubApiException（4xx/5xx 业务错误）是确定失败，不幂等确认；
+            // 仅连接级 IO 错误（网断/重置）才可能"资产已创建但响应丢失"，需确认。
+            if (e is GitHubApiException) throw e
+            LogBus.warn("上传 IO 异常（${e.message}），按资产名幂等确认…")
+            val found = findLfsAssetByName(owner, repo, releaseId, fileName)
+            if (found != null && found.size == totalBytes) {
+                val sha = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+                LogBus.info("幂等确认成功：资产 $fileName（${found.size} 字节）已完整创建，视为上传成功")
+                return found.copy(sha256 = sha)
+            }
+            LogBus.warn("幂等确认未找到完整资产 $fileName（size=${found?.size}, 期望=$totalBytes），按上传失败处理")
+            throw e
+        }
+        val o = JSONObject(respBody)
         val id = o.optLong("id", -1L)
         if (id <= 0) throw GitHubApiException(502, "上传资产失败：无法解析响应")
         val sha256 = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xFF) }
@@ -260,19 +363,45 @@ class GitHubClient(private val token: String) {
     /**
      * 打开 LFS 资产下载流。
      *
-     * 长流下载的关键设计（v2 修正）：
+     * 长流下载的关键设计（v2 修正 + 二修直链）：
      * 1. 用 assetClient（读超时 90s = 两次读取间隔上限，不是总时长），
      *    CDN 慢速但持续有数据时绝不误杀，真正挂起时仍能主动失败；
-     * 2. Accept: application/octet-stream 让 GitHub 直接返回二进制体，不走 browser_download_url
-     *    （那会在 302 后多一跳，且私库需要浏览器会话 cookie，API 路径 + token 更可靠）；
-     * 3. 返回的流由调用方负责关闭；close() 同时释放整个 Response，避免连接泄漏。
+     * 2. 优先走 GitHub Releases 浏览器直链
+     *    github.com/{owner}/{repo}/releases/download/{tag}/{file}——
+     *    绕开 api.github.com 网关（其 302 链路在国内网络下不稳定，实测下载中途
+     *    SocketTimeoutException）。直链本身由 github.com 302 到带签名的 CDN，
+     *    assetClient 自动跟随；携带 Authorization 兜底私有仓库。
+     *    前提：桶必须是已发布 release（getOrCreateLfsRelease 已改为发布态 +
+     *    publishLfsReleaseIfDraft 迁移旧桶）。draft 桶直链恒 404 → fallback。
+     * 3. 直链失败（404/超时/旧指针无 fileName）时 fallback 到 API 资产端点
+     *    /repos/{owner}/{repo}/releases/assets/{id}（原 v2 通道），保证旧数据可读。
+     * 4. 返回的流由调用方负责关闭；close() 同时释放整个 Response，避免连接泄漏。
      */
-    fun openLfsAssetStream(owner: String, repo: String, assetId: Long): java.io.InputStream {
-        val req = authRequest(url("/repos/$owner/$repo/releases/assets/$assetId"))
-            .header("Accept", "application/octet-stream")
-            .get()
-            .build()
-        val resp = assetClient.newCall(req).execute()
+    fun openLfsAssetStream(owner: String, repo: String, tag: String, pointer: GitRepository.LfsPointer?): java.io.InputStream {
+        // 直链优先：指针携带 fileName 且桶已发布（tag 对应 release 存在）时走浏览器直链
+        if (pointer != null && pointer.fileName.isNotBlank()) {
+            val fileNameEnc = java.net.URLEncoder.encode(pointer.fileName, "UTF-8").replace("+", "%20")
+            val directUrl = "https://github.com/$owner/$repo/releases/download/$tag/$fileNameEnc"
+            try {
+                LogBus.info("LFS 下载直链：$directUrl")
+                return openStreamInternal(directUrl)
+            } catch (e: Exception) {
+                LogBus.warn("LFS 直链下载失败（${e.message}），fallback 到 API 资产通道")
+            }
+        }
+        if (pointer == null || pointer.assetId <= 0) {
+            throw GitHubApiException(502, "LFS 指针无效：无资产 ID")
+        }
+        LogBus.info("LFS 下载 API 通道：asset ${pointer.assetId}")
+        val apiUrl = url("/repos/$owner/$repo/releases/assets/${pointer.assetId}")
+        return openStreamInternal(apiUrl, forceOctetStream = true)
+    }
+
+    /** 执行 GET 并返回响应流；forceOctetStream 时声明 Accept: octet-stream（API 通道需要） */
+    private fun openStreamInternal(downloadUrl: String, forceOctetStream: Boolean = false): java.io.InputStream {
+        val builder = authRequest(downloadUrl).get()
+        if (forceOctetStream) builder.header("Accept", "application/octet-stream")
+        val resp = assetClient.newCall(builder.build()).execute()
         if (!resp.isSuccessful) {
             val msg = extractErrorMessage(resp.body?.string().orEmpty())
             resp.close()
