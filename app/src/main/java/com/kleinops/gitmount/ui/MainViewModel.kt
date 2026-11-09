@@ -13,6 +13,7 @@ import com.kleinops.gitmount.data.RepoInfo
 import com.kleinops.gitmount.data.ServerMode
 import com.kleinops.gitmount.data.SettingsRepository
 import com.kleinops.gitmount.service.LogBus
+import com.kleinops.gitmount.service.MountService
 import com.kleinops.gitmount.service.ServerController
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
@@ -359,6 +360,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val client = GitHubClient(t)
                 client.deleteRepo(o, r)
+                // 删除仓库后联动解绑：所有绑定该仓库的挂载点清空仓库字段，
+                // 避免挂载点继续指向已删除的仓库导致服务激活失败/连不上
+                val unboundIds = try {
+                    settingsRepo.unbindRepoFromMountPoints(o, r)
+                } catch (e: Exception) {
+                    LogBus.warn("删除仓库后自动解绑挂载点失败：${e.message}")
+                    emptyList()
+                }
+                if (unboundIds.isNotEmpty()) {
+                    LogBus.warn("仓库 $o/$r 已删除，自动解绑挂载点：${unboundIds.joinToString()}")
+                    unboundIds.forEach { id ->
+                        // 服务在运行时同步释放该挂载点的监听与旧仓库缓存
+                        if (serverState.value.running && !serverState.value.starting) {
+                            MountService.sync(getApplication(), id)
+                        }
+                    }
+                }
                 // 绕过缓存强制刷新列表，让被删仓库立即可见地消失
                 scanCache = null
                 val login = client.getUser()

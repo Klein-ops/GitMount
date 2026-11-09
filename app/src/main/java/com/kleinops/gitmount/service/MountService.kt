@@ -385,8 +385,13 @@ class MountService : Service() {
                     LogBus.info("挂载点「${mountPoint.name}」不可用（停用或配置不完整），停止其监听（$mountPointId）")
                     stopSingleServer(mountPointId)
                 } else {
-                    // 挂载点可用：先停旧的（若有），再按最新配置起监听
+                    // 挂载点可用：先停旧的（若有），再按最新配置起监听。
+                    // 必须同时释放该挂载点的 repo 缓存——stopSingleServer 只关 socket，
+                    // 不释放 MountPointManager 里持有的旧 GitRepository；若这里不清缓存，
+                    // 下一次 FTP/WebDAV 认证会直接命中旧仓库的 repo 实例（即使配置已换成
+                    // 新仓库），导致"显示已绑定新仓库、FTP 却连的还是旧仓库"。
                     stopSingleServer(mountPointId)
+                    MountPointManager.release(mountPointId)
                     startSingleServer(mountPoint, settings.sharedToken, settings.loopbackOnly)
                 }
 

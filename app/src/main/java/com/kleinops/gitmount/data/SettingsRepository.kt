@@ -333,7 +333,31 @@ class SettingsRepository(private val context: Context) {
         }
     }
 
-    /** 序列化挂载点列表为 JSON（token 逐挂载点加密落盘） */
+    /**
+     * 删除仓库后联动解绑：把所有绑定到 owner/repo 的挂载点的仓库字段清空，
+     * 避免挂载点继续指向已删除的仓库导致服务无法激活。
+     * @return 被解绑的挂载点 id 列表（空 = 没有挂载点绑定该仓库）
+     */
+    suspend fun unbindRepoFromMountPoints(owner: String, repo: String): List<String> {
+        val unlocked = mutableListOf<String>()
+        context.dataStore.edit { p ->
+            val mountPoints = readMountPointsOrLegacy(p)
+            val updated = mountPoints.map { mp ->
+                if (mp.owner == owner && mp.repoName == repo) {
+                    unlocked += mp.id
+                    mp.copy(owner = "", repoName = "", branch = "main")
+                } else mp
+            }
+            if (unlocked.isNotEmpty()) {
+                p[Keys.MOUNT_POINTS_JSON] = writeMountPointsJson(updated)
+            }
+        }
+        return unlocked
+    }
+
+    /**
+     * 序列化挂载点列表为 JSON（token 逐挂载点加密落盘）
+     */
     private fun writeMountPointsJson(mountPoints: List<MountPointConfig>): String {
         val arr = org.json.JSONArray()
         mountPoints.forEach { mp ->
