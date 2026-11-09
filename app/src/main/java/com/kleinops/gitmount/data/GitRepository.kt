@@ -610,8 +610,7 @@ class GitRepository(
             if (n < 0) break
             if (size + n > data.size) {
                 val need = size + n
-                // coerceAtLeast 两边都是 Long，结果须转回 Int（copyOf 仅接受 Int 长度）
-                val newCap = need.coerceAtLeast(data.size.toLong() + 1024 * 1024).toInt()
+                val newCap = need.coerceAtLeast(data.size + 1024 * 1024)
                 data = java.util.Arrays.copyOf(data, newCap)
             }
             System.arraycopy(buf, 0, data, size.toInt(), n)
