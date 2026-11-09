@@ -1239,72 +1239,72 @@ private class StreamingRawRequestBody(
             sink.write(buf, 0, n)
         }
     }
+}
 
-    /**
-     * 组合分片流：按序读取多个分片文件。
-     * 切到第 i 片时先等待该片下载 Future 完成（抛异常则传播为 IOException），
-     * 再顺序读出该片全部字节，保证客户端永远读不到半截分片。
-     * close() 关闭当前流、删除全部临时文件并中断线程池剩余任务。
-     */
-    private class SequentialPartsStream(
-        private val files: List<java.io.File>,
-        private val futures: List<java.util.concurrent.Future<*>>,
-        private val pool: java.util.concurrent.ExecutorService,
-    ) : java.io.InputStream() {
-        private var index = 0
-        private var current: java.io.InputStream? = null
-        private var closed = false
+/**
+ * 组合分片流：按序读取多个分片文件。
+ * 切到第 i 片时先等待该片下载 Future 完成（抛异常则传播为 IOException），
+ * 再顺序读出该片全部字节，保证客户端永远读不到半截分片。
+ * close() 关闭当前流、删除全部临时文件并中断线程池剩余任务。
+ */
+private class SequentialPartsStream(
+    private val files: List<java.io.File>,
+    private val futures: List<java.util.concurrent.Future<*>>,
+    private val pool: java.util.concurrent.ExecutorService,
+) : java.io.InputStream() {
+    private var index = 0
+    private var current: java.io.InputStream? = null
+    private var closed = false
 
-        private fun awaitPart(i: Int) {
-            try {
-                futures[i].get()
-            } catch (e: java.util.concurrent.ExecutionException) {
-                throw (e.cause as? IOException) ?: IOException("LFS 分片 $i 下载失败：${e.cause?.message}", e.cause)
-            } catch (e: InterruptedException) {
-                Thread.currentThread().interrupt()
-                throw IOException("LFS 分片 $i 下载被中断", e)
-            }
+    private fun awaitPart(i: Int) {
+        try {
+            futures[i].get()
+        } catch (e: java.util.concurrent.ExecutionException) {
+            throw (e.cause as? IOException) ?: IOException("LFS 分片 $i 下载失败：${e.cause?.message}", e.cause)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw IOException("LFS 分片 $i 下载被中断", e)
         }
+    }
 
-        override fun read(): Int {
-            val b = ByteArray(1)
-            val n = read(b, 0, 1)
-            return if (n < 0) -1 else b[0].toInt() and 0xFF
+    override fun read(): Int {
+        val b = ByteArray(1)
+        val n = read(b, 0, 1)
+        return if (n < 0) -1 else b[0].toInt() and 0xFF
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int {
+        if (closed) throw IOException("流已关闭")
+        if (len == 0) return 0
+        while (true) {
+            if (index >= files.size) return -1
+            val stream = current
+            if (stream == null) {
+                awaitPart(index)
+                current = java.io.FileInputStream(files[index])
+                continue
+            }
+            val n = stream.read(b, off, len)
+            if (n >= 0) return n
+            // 当前片读完：切下一片
+            stream.close()
+            current = null
+            index++
         }
+    }
 
-        override fun read(b: ByteArray, off: Int, len: Int): Int {
-            if (closed) throw IOException("流已关闭")
-            if (len == 0) return 0
-            while (true) {
-                if (index >= files.size) return -1
-                val stream = current
-                if (stream == null) {
-                    awaitPart(index)
-                    current = java.io.FileInputStream(files[index])
-                    continue
-                }
-                val n = stream.read(b, off, len)
-                if (n >= 0) return n
-                // 当前片读完：切下一片
-                stream.close()
-                current = null
-                index++
-            }
+    override fun close() {
+        if (closed) return
+        closed = true
+        try {
+            current?.close()
+        } catch (_: Exception) {
+        } finally {
+            current = null
         }
-
-        override fun close() {
-            if (closed) return
-            closed = true
-            try {
-                current?.close()
-            } catch (_: Exception) {
-            } finally {
-                current = null
-            }
-            pool.shutdownNow()
-            files.forEach { file ->
-                runCatching { file.delete() }
-            }
+        pool.shutdownNow()
+        files.forEach { file ->
+            runCatching { file.delete() }
         }
     }
 }
