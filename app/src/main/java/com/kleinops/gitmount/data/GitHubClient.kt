@@ -117,20 +117,12 @@ class GitHubClient(private val token: String) {
         val assetId: Long,
         val size: Long,
         val fileName: String,
-        /** 上传内容的 SHA-256（流式边传边算，用于下载后完整性比对） */
-        val sha256: String = "",
     )
 
     /**
      * 获取 LFS 桶（release）的 numeric id；不存在则创建（draft）。
      * 每个仓库固定一个 tag 承载全部大文件资产，避免每文件一个 release 的碎片化。
      * draft release 对外不可见，正好满足"仅本机/局域网访问"的语义。
-     *
-     * 2026-11-09 实测修正：**不能用 GET /releases/tags/{tag} 查桶**——GitHub 对
-     * draft release 的该端点【恒返回 404】（draft 未发布，tag ref 不存在），
-     * 导致每次上传大文件都"查不到桶→新建桶"，桶无限增殖，且 hasLfsBucket 恒 false
-     * 造成列表显示指针小文件、下载拿到索引而非资产。改为遍历 releases 列表
-     * （draft 也包含在列表里）按 tag_name 匹配，一次修复桶增殖 + 大小显示 + 下载链路。
      */
     fun getOrCreateLfsRelease(
         owner: String,
@@ -138,7 +130,13 @@ class GitHubClient(private val token: String) {
         tag: String,
         title: String = "GitMount LFS 存储桶",
     ): Long {
-        val existing = findReleaseIdByTag(owner, repo, tag)
+        // 先查已有 release：GET /repos/{owner}/{repo}/releases/tags/{tag}
+        val existing = try {
+            val body = execute(authRequest(url("/repos/$owner/$repo/releases/tags/$tag")).get())
+            JSONObject(body).optLong("id", -1L)
+        } catch (e: GitHubApiException) {
+            if (e.code == 404) -1L else throw e
+        }
         if (existing > 0) return existing
         // 创建：POST /repos/{owner}/{repo}/releases，draft=true（不对外暴露）
         val payload = JSONObject()
@@ -160,34 +158,14 @@ class GitHubClient(private val token: String) {
      * 用于目录列表时判断"是否值得解析小文件是否为指针"——没有大文件的仓库
      * 跳过解析，避免对每个小文件都发一次 GET 打爆配额。
      */
-    fun getLfsReleaseIfExists(owner: String, repo: String, tag: String): Long? =
-        findReleaseIdByTag(owner, repo, tag).takeIf { it > 0 }
-
-    /**
-     * 遍历 releases 列表（含 draft）按 tag_name 匹配，返回 release id；找不到返回 -1。
-     * 分页遍历最多 3 页（300 个 release），正常仓库远达不到；每页不足 100 个即停。
-     */
-    private fun findReleaseIdByTag(owner: String, repo: String, tag: String): Long {
-        for (page in 1..3) {
-            val arr = try {
-                val body = execute(
-                    authRequest(url("/repos/$owner/$repo/releases?per_page=100&page=$page")).get()
-                )
-                JSONArray(body)
-            } catch (e: GitHubApiException) {
-                if (e.code == 404) return -1L else throw e
-            }
-            if (arr.length() == 0) break
-            for (i in 0 until arr.length()) {
-                val o = arr.getJSONObject(i)
-                if (o.optString("tag_name") == tag) {
-                    val id = o.optLong("id", -1L)
-                    if (id > 0) return id
-                }
-            }
-            if (arr.length() < 100) break
+    fun getLfsReleaseIfExists(owner: String, repo: String, tag: String): Long? {
+        return try {
+            val body = execute(authRequest(url("/repos/$owner/$repo/releases/tags/$tag")).get())
+            val id = JSONObject(body).optLong("id", -1L)
+            if (id > 0) id else null
+        } catch (e: GitHubApiException) {
+            if (e.code == 404) null else throw e
         }
-        return -1L
     }
 
     /**
@@ -216,11 +194,7 @@ class GitHubClient(private val token: String) {
     ): LfsAsset {
         val name = java.net.URLEncoder.encode(fileName, "UTF-8").replace("+", "%20")
         val uploadUrl = "https://uploads.github.com/repos/$owner/$repo/releases/$releaseId/assets?name=$name"
-        // 流式边传边算 SHA-256：用 DigestInputStream 包一层，写请求体时自动累计摘要，
-        // 上传成功后 digest.digest() 即完整文件哈希（写进 LFS 指针，下载后可比对完整性）。
-        val digest = java.security.MessageDigest.getInstance("SHA-256")
-        val digestInput = java.io.DigestInputStream(input, digest)
-        val body = StreamingRawRequestBody(digestInput, maxBytes, totalBytes)
+        val body = StreamingRawRequestBody(input, maxBytes, totalBytes)
         val req = authRequest(uploadUrl)
             .header("Content-Type", "application/octet-stream")
             .post(body)
@@ -228,8 +202,7 @@ class GitHubClient(private val token: String) {
         val o = JSONObject(resp)
         val id = o.optLong("id", -1L)
         if (id <= 0) throw GitHubApiException(502, "上传资产失败：无法解析响应")
-        val sha256 = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xFF) }
-        return LfsAsset(id, o.optLong("size", 0L), o.optString("name", fileName), sha256)
+        return LfsAsset(id, o.optLong("size", 0L), o.optString("name", fileName))
     }
 
     /** 删除 LFS 桶内指定资产（与"删指针文件"配合，先删资产避免泄漏） */
