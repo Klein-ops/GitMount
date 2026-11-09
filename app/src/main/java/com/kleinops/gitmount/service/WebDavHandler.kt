@@ -245,13 +245,12 @@ class WebDavHandler(
             return
         }
         try {
-            // 大文件（>40MB）：请求体是流（bodyStream），带已知 Content-Length
-            // 直接流式转发给 GitHub Releases 通道（GitHub 拒绝 chunked，必须已知长度）；
+            // 大文件（>40MB）：请求体是流（bodyStream），直接流式转发给 GitHub Releases 通道；
             // 小文件：用内存 body（现状）。
             val node = if (exchange.hasStreamBody) {
                 val stream = exchange.bodyStream
                     ?: throw IOException("请求体流不可用")
-                repo.writeStream(path, stream, knownLength = contentLength)
+                repo.writeStream(path, stream)
             } else {
                 repo.write(path, exchange.body)
             }

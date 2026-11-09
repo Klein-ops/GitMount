@@ -1,6 +1,5 @@
 package com.kleinops.gitmount.service
 
-import android.content.Context
 import com.kleinops.gitmount.data.MountPointConfig
 import com.kleinops.gitmount.data.GitHubClient
 import com.kleinops.gitmount.data.GitRepository
@@ -15,14 +14,6 @@ import java.util.concurrent.ConcurrentHashMap
  * 空闲超时后释放回到沉睡。端口监听由 MountService 为每挂载点独立维持。
  */
 object MountPointManager {
-
-    /** 应用上下文（GitMountApp.onCreate 注入），用于大文件上传临时目录等 */
-    @Volatile
-    var appContext: Context? = null
-
-    /** 大文件上传 spool 临时目录（FTP 场景需要；无 context 时返回 null） */
-    private val spoolDir: java.io.File?
-        get() = appContext?.cacheDir?.let { java.io.File(it, "gm-upload").apply { mkdirs() } }
 
     /**
      * 空闲回收阈值：挂载点无活跃操作超过该时长即释放仓库缓存。
@@ -62,7 +53,7 @@ object MountPointManager {
             entry.activeOps++
             try {
                 val token = mountPoint.effectiveToken(sharedToken)
-                val repo = GitRepository(GitHubClient(token), mountPoint.owner, mountPoint.repoName, mountPoint.branch, spoolDir)
+                val repo = GitRepository(GitHubClient(token), mountPoint.owner, mountPoint.repoName, mountPoint.branch)
                 repo.visibleList("/") // 连通性探测：确保仓库真实可读
                 entry.repo = repo
                 entry.touch()

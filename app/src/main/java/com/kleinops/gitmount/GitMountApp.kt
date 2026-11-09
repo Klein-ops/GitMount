@@ -3,14 +3,11 @@ package com.kleinops.gitmount
 import android.app.Application
 import com.kleinops.gitmount.service.FileLogger
 import com.kleinops.gitmount.service.LogBus
-import com.kleinops.gitmount.service.MountPointManager
 import com.kleinops.gitmount.service.ServiceSelfHeal
 
 class GitMountApp : Application() {
     override fun onCreate() {
         super.onCreate()
-        // 注入应用上下文（挂载点管理器需要：大文件上传临时目录等）
-        MountPointManager.appContext = applicationContext
         // 初始化文件日志（写到应用外部私有目录，供排查问题直接读取）
         FileLogger.init(this)
         LogBus.info("GitMount 应用启动，文件日志已初始化")

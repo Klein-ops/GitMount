@@ -31,12 +31,6 @@ class GitRepository(
     private val owner: String,
     private val repo: String,
     private val branch: String,
-    /**
-     * 大文件上传临时落盘目录（FTP 场景数据连接无总长度，需先把剩余流
-     * 写入临时文件统计字节数，再以已知 Content-Length 上传 GitHub。
-     * 由 MountService 传入 cacheDir；为 null 时未知长度大文件上传直接报错）。
-     */
-    private val spoolDir: java.io.File? = null,
 ) {
 
     companion object {
@@ -503,7 +497,7 @@ class GitRepository(
                 val releaseId = ensureLfsRelease()
                 val asset = client.uploadLfsAsset(
                     owner, repo, releaseId, newLfsAssetName(),
-                    data.inputStream(), MAX_LFS_SIZE, data.size.toLong(),
+                    data.inputStream(), MAX_LFS_SIZE,
                 )
                 val ptr = LfsPointer(asset.assetId, asset.size, "", System.currentTimeMillis())
                 writePointerFile(norm, ptr, existing?.sha, commitMessage)
@@ -529,28 +523,16 @@ class GitRepository(
     }
 
     /**
-     * 流式写入文件（创建或覆盖）：直接读输入流转发给 GitHub，不把整个文件驻留内存。
+     * 流式写入文件（创建或覆盖）：直接读输入流产线转发给 GitHub，不把整个文件驻留内存。
      *
-     * 用于 WebDAV 上传（HTTP 头带 Content-Length → knownLength 已知，大文件全流式
-     * 直传 Releases 通道，无探测、无前缀冗余）；FTP 上传数据连接无长度信息，
-     * 调用方（FtpServer）需先把数据落盘临时文件统计总长，再以 knownLength 调用本方法。
-     *
-     * 长度语义（2026-11-09 实测修正）：GitHub 上传接口（uploads.github.com 与
-     * Contents API PUT）【拒绝 Transfer-Encoding: chunked】，强制要求已知
-     * Content-Length。因此本方法不再走 chunked：小文件（≤40MB）读入内存走
-     * putFile（固定长度）；大文件带 knownLength 走 Releases 通道（固定长度）。
+     * 用于 FTP 上传：数据连接收到的字节边收边 base64 发往 GitHub（chunked），
+     * FTP 客户端的进度会被 GitHub 公网真实上传速度拖住，
+     * 消除"客户端 100% 但 GitHub 才刚开始传"的假完成。
      *
      * @param input 上传数据流；调用方需配置 soTimeout，read 空闲超时（SocketTimeoutException）
      *              视为数据已发完（与 readLimited 的 DATA_IDLE_TIMEOUT 语义一致）。
-     * @param knownLength 数据流总长度；未知（null）时内部探测，探测出大文件但无
-     *                    knownLength 会抛异常（FTP 场景必须先 spool 统计）
      */
-    fun writeStream(
-        path: String,
-        input: java.io.InputStream,
-        commitMessage: String? = null,
-        knownLength: Long? = null,
-    ): VfsNode {
+    fun writeStream(path: String, input: java.io.InputStream, commitMessage: String? = null): VfsNode {
         reclaimIfIdle()
         val norm = normalize(path)
         if (norm == "/") throw IOException("不能写入根目录")
@@ -560,13 +542,9 @@ class GitRepository(
             ensureParentDirs(norm)
             val gitPath = toGitPath(norm)
             val existing = client.getFileMeta(owner, repo, gitPath, branch)
-            if (knownLength != null && knownLength > MAX_FILE_SIZE) {
-                // 已知长度的大文件：全流式直传 Releases（无探测、无前缀拼接）
-                return writeLfsStream(norm, input, knownLength, existing, commitMessage)
-            }
-            // 长度未知（或小文件）：先探测读入至多 MAX_FILE_SIZE+1 字节。
-            // ≤40MB → 完整内容已缓冲，走 Contents 通道（内存 putFile，固定长度）；
-            // >40MB → 需 knownLength（FTP 层应已 spool 统计），前缀 + 剩余流拼装后走 Releases。
+            // 流式上传无法预知总大小：先探测读入至多 MAX_FILE_SIZE+1 字节。
+            // ≤40MB → 完整内容已缓冲，走 Contents 流式（保持历史语义）；
+            // >40MB → 已是"大文件"，把已读前缀与剩余输入流拼装后一并转发给 Releases 通道。
             val probe = readProbe(input, MAX_FILE_SIZE + 1)
             if (probe.size <= MAX_FILE_SIZE) {
                 // 小文件覆盖大文件：旧文件若是指针（真实内容在 Releases），先删其资产
@@ -578,99 +556,34 @@ class GitRepository(
                         if (e.code != 404) throw e
                     }
                 }
-                // 小文件：Contents 通道（内存 putFile，固定长度——Contents API 拒绝 chunked，
-                // 不再用流式 base64。probe 已含完整内容，长度已知）
+                // 小文件：Contents 通道（历史行为，流式进 GitHub）
                 val msg = commitMessage ?: if (existing == null) "上传 ${nameOf(norm)}" else "更新 ${nameOf(norm)}"
-                val meta = client.putFile(owner, repo, gitPath, probe, existing?.sha, msg, branch)
+                val meta = client.putFileStream(
+                    owner, repo, gitPath,
+                    java.io.ByteArrayInputStream(probe), existing?.sha, msg, branch,
+                )
                 invalidate(parentOf(norm))
                 invalidate(norm)
                 VfsNode(nameOf(norm), norm, false, meta.size, meta.sha)
             } else {
-                // 探测出大文件且长度未知（FTP 场景）：必须先落盘统计总长度，
-                // 再以已知 Content-Length 上传（GitHub 拒绝 chunked）。
-                if (knownLength != null) {
-                    // knownLength 声明 ≤40MB 但实际探测出 >40MB：客户端长度声明与实际不符
-                    throw IOException("文件长度声明不一致：探测超过 ${MAX_FILE_SIZE / 1000 / 1000}MB 但声明为 $knownLength 字节")
-                }
-                val (tmp, totalBytes) = spoolToTemp(probe, input)
-                try {
-                    java.io.FileInputStream(tmp).use { fileIn ->
-                        writeLfsStream(norm, fileIn, totalBytes, existing, commitMessage)
+                // 大文件通道：Releases（已读前缀 + 剩余流无缝拼接，边收边传）
+                // 覆盖旧资产：读旧指针（若有）拿精确 asset_id 删除，绝不按名猜
+                val oldPointer = tryReadPointer(norm)
+                if (oldPointer != null && oldPointer.assetId > 0) {
+                    try {
+                        client.deleteLfsAsset(owner, repo, oldPointer.assetId)
+                    } catch (e: GitHubApiException) {
+                        if (e.code != 404) throw e // 404 = 资产已被删（外部清理过），忽略
                     }
-                } finally {
-                    tmp.delete()
                 }
+                val releaseId = ensureLfsRelease()
+                val combined = java.io.SequenceInputStream(java.io.ByteArrayInputStream(probe), input)
+                val asset = client.uploadLfsAsset(owner, repo, releaseId, newLfsAssetName(), combined, MAX_LFS_SIZE)
+                val ptr = LfsPointer(asset.assetId, asset.size, "", System.currentTimeMillis())
+                writePointerFile(norm, ptr, existing?.sha, commitMessage)
             }
         } finally {
             writeLock.unlock()
-        }
-    }
-
-    /**
-     * LFS 大文件公共上传流程：删除旧资产（若有）→ ensure 桶 → 已知长度流式上传
-     * → 写指针文件。长度已知（GitHub 拒绝 chunked，必须带固定 Content-Length）。
-     */
-    private fun writeLfsStream(
-        norm: String,
-        input: java.io.InputStream,
-        totalBytes: Long,
-        existing: FileMeta?,
-        commitMessage: String?,
-    ): VfsNode {
-        // 覆盖旧资产：读旧指针（若有）拿精确 asset_id 删除，绝不按名猜（防撞名误删）
-        val oldPointer = tryReadPointer(norm)
-        if (oldPointer != null && oldPointer.assetId > 0) {
-            try {
-                client.deleteLfsAsset(owner, repo, oldPointer.assetId)
-            } catch (e: GitHubApiException) {
-                if (e.code != 404) throw e // 404 = 资产已被删（外部清理过），忽略
-            }
-        }
-        val releaseId = ensureLfsRelease()
-        val asset = client.uploadLfsAsset(owner, repo, releaseId, newLfsAssetName(), input, MAX_LFS_SIZE, totalBytes)
-        val ptr = LfsPointer(asset.assetId, asset.size, "", System.currentTimeMillis())
-        writePointerFile(norm, ptr, existing?.sha, commitMessage)
-        invalidate(parentOf(norm))
-        invalidate(norm)
-        return VfsNode(nameOf(norm), norm, false, asset.size, existing?.sha ?: "")
-    }
-
-    /**
-     * 把"已探测前缀 + 剩余输入流"完整落盘到临时文件，返回 (临时文件, 写入总字节数)。
-     *
-     * 用于 FTP 大文件上传：数据连接无总长度 → 先写满临时文件统计字节，
-     * 再以已知 Content-Length 上传 GitHub（GitHub 拒绝 chunked）。
-     * 自动校验不超过 MAX_LFS_SIZE；失败时清理临时文件。
-     */
-    private fun spoolToTemp(prefix: ByteArray, rest: java.io.InputStream): Pair<java.io.File, Long> {
-        val dir = spoolDir
-            ?: throw IOException("大文件上传需要临时目录（FTP 模式需配置应用缓存目录）")
-        if (!dir.exists()) dir.mkdirs()
-        val tmp = java.io.File.createTempFile("gm-upload-", ".tmp", dir)
-        try {
-            var total = 0L
-            java.io.FileOutputStream(tmp).use { out ->
-                out.write(prefix)
-                total += prefix.size
-                val buf = ByteArray(128 * 1024)
-                while (true) {
-                    val n = try {
-                        rest.read(buf)
-                    } catch (e: java.net.SocketTimeoutException) {
-                        break // 客户端发完数据但未关闭数据连接（在等 226），视为传输结束
-                    }
-                    if (n < 0) break
-                    total += n
-                    if (total > MAX_LFS_SIZE) {
-                        throw FileTooLargeException(MAX_LFS_SIZE)
-                    }
-                    out.write(buf, 0, n)
-                }
-            }
-            return tmp to total
-        } catch (e: Exception) {
-            tmp.delete()
-            throw e
         }
     }
 
@@ -916,7 +829,7 @@ class GitRepository(
                 val releaseId = ensureLfsRelease()
                 val src = client.openLfsAssetStream(owner, repo, pointer.assetId)
                 val asset = try {
-                    client.uploadLfsAsset(owner, repo, releaseId, newLfsAssetName(), src, MAX_LFS_SIZE, pointer.size)
+                    client.uploadLfsAsset(owner, repo, releaseId, newLfsAssetName(), src, MAX_LFS_SIZE)
                 } finally {
                     src.close()
                 }
