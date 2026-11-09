@@ -505,7 +505,7 @@ class GitRepository(
                     owner, repo, releaseId, newLfsAssetName(),
                     data.inputStream(), MAX_LFS_SIZE, data.size.toLong(),
                 )
-                val ptr = LfsPointer(asset.assetId, asset.size, "", System.currentTimeMillis())
+                val ptr = LfsPointer(asset.assetId, asset.size, asset.sha256, System.currentTimeMillis())
                 writePointerFile(norm, ptr, existing?.sha, commitMessage)
             } else {
                 // 小文件覆盖大文件：旧文件若是指针（真实内容在 Releases），先删其资产
@@ -628,7 +628,7 @@ class GitRepository(
         }
         val releaseId = ensureLfsRelease()
         val asset = client.uploadLfsAsset(owner, repo, releaseId, newLfsAssetName(), input, MAX_LFS_SIZE, totalBytes)
-        val ptr = LfsPointer(asset.assetId, asset.size, "", System.currentTimeMillis())
+        val ptr = LfsPointer(asset.assetId, asset.size, asset.sha256, System.currentTimeMillis())
         writePointerFile(norm, ptr, existing?.sha, commitMessage)
         invalidate(parentOf(norm))
         invalidate(norm)
@@ -920,7 +920,7 @@ class GitRepository(
                 } finally {
                     src.close()
                 }
-                val newPtr = LfsPointer(asset.assetId, asset.size, "", System.currentTimeMillis())
+                val newPtr = LfsPointer(asset.assetId, asset.size, asset.sha256, System.currentTimeMillis())
                 writePointerFile(to, newPtr, null, "复制 ${node.name}")
             } else {
                 val data = read(from)
