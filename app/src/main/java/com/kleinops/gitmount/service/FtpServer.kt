@@ -549,11 +549,23 @@ class FtpServer(
 
         private fun doRetr(arg: String) {
             val path = resolve(arg)
+            // FTP 时序：必须先回 150，客户端收到后才连 PASV 数据端口；openDataSocket()
+            // 的 accept() 依赖这个 150 才会等到客户端连入。之后才做 GitHub 网络准备。
             reply(150, "开始下载")
-            val dataSocket = openDataSocket() ?: return
+            val dataSocket = openDataSocket()
+            if (dataSocket == null) {
+                // 数据连接建立失败（accept 超时/主动模式连接失败）必须回明确错误，
+                // 否则控制连接只有 150、再无响应，客户端 readLine 等到自己超时崩溃
+                LogBus.warn("FTP 下载中止：$path 数据连接建立失败")
+                reply(425, "无法建立数据连接，请重试")
+                return
+            }
+            LogBus.info("FTP 流式下载开始 → $path（REST=$restartOffset）")
             try {
-                // 流式下载：LFS 大文件（指针对应 Releases 资产）边下载边发给客户端，
-                // 不整读进内存（大文件 RETR 不 OOM）；小文件走整读（openReadStream 内部处理）。
+                // GitHub 网络准备：读指针文件 + 打开 Releases 资产下载流（可能 302 到 CDN）。
+                // 用 assetClient 短超时(30s) 保证这里必然在有限时间内成功或失败，
+                // 不会像旧全局 readTimeout(120s) 那样让客户端在数据连接上干等 2 分钟。
+                // 失败走 catch 回 550 明确错误；成功后立即转发，数据连接等待窗口最长 30s。
                 val stream = repo.openReadStream(path)
                 stream.use { input ->
                     // REST 断点续传：跳过 restartOffset 字节再发送
@@ -567,19 +579,36 @@ class FtpServer(
                     val buf = ByteArray(128 * 1024)
                     val out = dataSocket.getOutputStream()
                     var total = 0L
+                    var lastLogMb = 0L
                     while (true) {
                         val n = input.read(buf)
                         if (n < 0) break
                         out.write(buf, 0, n)
                         total += n
+                        // 每 10MB 记一条进度：大文件传输卡住时能定位"卡在第几 MB"
+                        val mb = total / (10 * 1024 * 1024)
+                        if (mb > lastLogMb) {
+                            lastLogMb = mb
+                            LogBus.info("FTP 下载进行中：$path ${total / 1024 / 1024}MB")
+                        }
                     }
                     out.flush()
                     restartOffset = 0
                     ServerController.addTraffic(0, total)
                     dataSocket.close()
+                    LogBus.info("FTP 下载完成：$path（$total 字节）")
                     reply(226, "下载完成")
                 }
+            } catch (e: java.net.SocketTimeoutException) {
+                // GitHub 拉流（或客户端读）长时间无数据，assetClient 短超时(30s) 触发
+                LogBus.warn("FTP 下载超时：$path → ${e.message}")
+                try {
+                    dataSocket.close()
+                } catch (_: IOException) {
+                }
+                reply(426, "下载超时：${e.message}")
             } catch (e: Exception) {
+                LogBus.error("FTP 下载失败：$path → ${e.message}")
                 try {
                     dataSocket.close()
                 } catch (_: IOException) {

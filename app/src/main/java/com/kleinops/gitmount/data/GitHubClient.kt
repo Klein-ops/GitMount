@@ -87,6 +87,20 @@ class GitHubClient(private val token: String) {
         .writeTimeout(120, TimeUnit.SECONDS)
         .build()
 
+    /**
+     * 大文件资产下载专用 OkHttp：连接 15s / 读 30s，比全局 client 短得多。
+     * 原因：asset 下载会 302 到 release-assets CDN，若 CDN 慢/挂起而全局
+     * readTimeout(120s)，FTP/WebDAV 转发线程会傻等 120s 才失败，而客户端
+     * （控制连接 readLine / HTTP 读响应）超时通常只有 30~60s，必然客户端先
+     * 超时（SocketTimeoutException）。用短超时让服务器在客户端超时之前主动
+     * 失败并回明确错误，客户端能收到失败而不是干等。
+     */
+    private val assetClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .build()
+
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
 
     private fun url(path: String): String = "https://api.github.com$path"
@@ -246,7 +260,9 @@ class GitHubClient(private val token: String) {
             .header("Accept", "application/octet-stream")
             .get()
             .build()
-        val resp = client.newCall(req).execute()
+        // 用 assetClient（短超时）：CDN 挂起时在 30s 内主动失败，而不是傻等 120s
+        // 拖垮转发线程，让 FTP/WebDAV 客户端在自身超时前收到明确失败而非 readLine 卡死
+        val resp = assetClient.newCall(req).execute()
         if (!resp.isSuccessful) {
             val msg = extractErrorMessage(resp.body?.string().orEmpty())
             resp.close()
