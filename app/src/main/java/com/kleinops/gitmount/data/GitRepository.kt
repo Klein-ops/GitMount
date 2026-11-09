@@ -130,10 +130,14 @@ class GitRepository(
     private val dirCache = ConcurrentHashMap<String, CacheEntry>()
     private val fileCache = ConcurrentHashMap<String, FileCacheEntry>()
 
-    /** 指针解析结果缓存：norm path -> LfsPointer?（null = 已确认非指针）。
+    /** 指针解析结果缓存条目（pointer 为 null = 已确认非指针） */
+    private class PointerEntry(val pointer: LfsPointer?)
+
+    /** 指针解析结果缓存：norm path -> PointerEntry。
      * 旧版只缓存 size、解析结果每次都要重新读文件内容，导致 stat/list 对指针文件
-     * 反复 GET 打爆配额。这里缓存完整解析结果（含空结果），invalidate 时清除。 */
-    private val pointerCache = ConcurrentHashMap<String, LfsPointer?>()
+     * 反复 GET 打爆配额。这里缓存完整解析结果（含空结果），invalidate 时清除。
+     * 注意：ConcurrentHashMap 禁止 null value，必须用包装类容纳 null 指针。 */
+    private val pointerCache = ConcurrentHashMap<String, PointerEntry>()
 
     /** LFS 桶 release id 缓存（首次获取后缓存，避免每次上传/删除都查接口） */
     @Volatile
@@ -289,7 +293,7 @@ class GitRepository(
      * 只对 ≤ POINTER_MAX_BYTES 的小文件尝试解析（指针必然极小）。
      */
     private fun tryReadPointer(norm: String): LfsPointer? {
-        pointerCache[norm]?.let { return it }
+        pointerCache[norm]?.let { return it.pointer }
         val bytes = try {
             read(norm)
         } catch (e: Exception) {
@@ -297,7 +301,7 @@ class GitRepository(
         }
         if (bytes.size > POINTER_MAX_BYTES) return null
         val ptr = LfsPointer.parse(String(bytes, Charsets.UTF_8))
-        pointerCache[norm] = ptr
+        pointerCache[norm] = PointerEntry(ptr)
         return ptr
     }
 
@@ -376,9 +380,9 @@ class GitRepository(
                 // 避免普通小文件仓库 list 时每文件多打一次 GET 耗尽配额）
                 if (e.type != "dir" && e.size <= POINTER_MAX_BYTES && hasLfsBucket()) {
                     val childPath = if (norm == "/") "/${e.name}" else "$norm/${e.name}"
-                    val cachedSize = pointerCache[childPath]?.size
-                    if (cachedSize != null) {
-                        size = cachedSize
+                    val cached = pointerCache[childPath]
+                    if (cached != null) {
+                        cached.pointer?.let { size = it.size }
                     } else {
                         tryReadPointer(childPath)?.let { size = it.size }
                     }
