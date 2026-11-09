@@ -5,7 +5,6 @@ import com.kleinops.gitmount.data.GitRepository
 import com.kleinops.gitmount.data.VfsNode
 import com.kleinops.gitmount.service.LogBus
 import com.kleinops.gitmount.service.http.HttpExchange
-import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 
@@ -199,29 +198,26 @@ class WebDavHandler(
             exchange.respond(404)
             return
         }
-        // HEAD：只回元信息（Content-Length = 真实大小），不读内容
-        if (exchange.method == "HEAD") {
-            exchange.respond(
-                200,
-                contentType = mimeType(node.name),
-                extra = mapOf(
-                    "Content-Disposition" to "inline",
-                    "ETag" to "\"${node.sha}\"",
-                    "Content-Length" to node.size.toString(),
-                ),
-            )
-            return
-        }
-        try {
-            // 流式响应：大文件（LFS 指向 Releases）边下载边发客户端，不整读进内存
-            exchange.respondStream(200, repo.openReadStream(path), mapOf(
-                "Content-Type" to mimeType(node.name),
-                "Content-Disposition" to "inline",
-                "ETag" to "\"${node.sha}\"",
-                "Content-Length" to node.size.toString(),
-            ))
+        val bytes = try {
+            repo.read(path)
         } catch (e: Exception) {
             exchange.respond(500, body = e.message?.toByteArray() ?: ByteArray(0))
+            return
+        }
+        exchange.respond(
+            200,
+            contentType = mimeType(node.name),
+            body = bytes,
+            extra = mapOf(
+                "Content-Disposition" to "inline",
+                "ETag" to "\"${node.sha}\"",
+            ),
+        )
+        // HEAD 由 HttpServer 以 GET 相同逻辑执行，但避免发送 body 由上层判断
+        if (exchange.method == "HEAD") {
+            exchange.bodyBytes = ByteArray(0)
+            // 修正 Content-Length 为文件大小
+            exchange.responseHeaders["Content-Length"] = bytes.size.toString()
         }
     }
 
@@ -240,20 +236,12 @@ class WebDavHandler(
             return
         }
         val contentLength = exchange.header("content-length")?.toLongOrNull() ?: 0L
-        if (contentLength > GitRepository.MAX_LFS_SIZE) {
+        if (contentLength > GitRepository.MAX_FILE_SIZE) {
             exchange.respond(413)
             return
         }
         try {
-            // 大文件（>40MB）：请求体是流（bodyStream），直接流式转发给 GitHub Releases 通道；
-            // 小文件：用内存 body（现状）。
-            val node = if (exchange.hasStreamBody) {
-                val stream = exchange.bodyStream
-                    ?: throw IOException("请求体流不可用")
-                repo.writeStream(path, stream)
-            } else {
-                repo.write(path, exchange.body)
-            }
+            val node = repo.write(path, exchange.body)
             exchange.respond(
                 201,
                 extra = mapOf(
@@ -264,8 +252,6 @@ class WebDavHandler(
         } catch (e: OutOfMemoryError) {
             LogBus.error("写入内存不足：${e.message}")
             exchange.respond(500, body = "内存不足，请关闭其他应用后重试".toByteArray())
-        } catch (e: com.kleinops.gitmount.data.FileTooLargeException) {
-            exchange.respond(413, body = e.message?.toByteArray() ?: ByteArray(0))
         } catch (e: Exception) {
             exchange.respond(409, body = e.message?.toByteArray() ?: ByteArray(0))
         }

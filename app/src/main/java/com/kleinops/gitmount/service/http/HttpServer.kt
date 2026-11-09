@@ -1,6 +1,5 @@
 package com.kleinops.gitmount.service.http
 
-import com.kleinops.gitmount.data.GitRepository
 import com.kleinops.gitmount.service.ServerController
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -23,17 +22,9 @@ class HttpServer(
     private val handler: (HttpExchange) -> Unit,
     /** 绑定地址；null/0.0.0.0 = 监听所有网卡（局域网），127.0.0.1 = 仅本机 */
     private val bindAddress: String? = null,
-    /**
-     * 请求体硬上限：超过时在读 body 之前直接回 413，避免超大上传白白占用内存/带宽。
-     * 上限 = GitHub Releases 单资产上限（2GB），大文件统一走 Releases 通道。
-     */
-    private val maxBodyBytes: Long = GitRepository.MAX_LFS_SIZE,
-    /**
-     * 流式阈值：Content-Length 超过该值的请求体【不读入内存】，
-     * 以 bodyStream 形式交给 handler 直接转发给 GitHub（大文件 PUT 不 OOM）。
-     * 与 GitRepository.MAX_FILE_SIZE（40MB Contents 阈值）保持一致。
-     */
-    private val streamBodyLimit: Long = GitRepository.MAX_FILE_SIZE,
+    /** 请求体上限：超过时在读 body 之前直接回 413，避免超大上传白白占用内存/带宽
+     *  与 GitRepository.MAX_FILE_SIZE（40MB 本地拦截线）保持一致 */
+    private val maxBodyBytes: Long = 40L * 1000 * 1000,
 ) {
     private val serverSocket = ServerSocket().apply {
         // 必须显式 reuseAddress：增量同步会"停旧监听→立即用同端口重新 bind"，
@@ -157,34 +148,27 @@ class HttpServer(
 
         val cl = headers["content-length"]?.toLongOrNull() ?: 0L
         // 关键：在【读取 body 之前】就拦截超大上传。
-        // 超大文件本来就会被 GitRepository.MAX_LFS_SIZE 拒绝，提前在这里挡掉，
-        // 可以完全避免把数 GB 的字节读进内存。
+        // 超大文件本来就会被 GitRepository.MAX_FILE_SIZE 拒绝，提前在这里挡掉，
+        // 可以完全避免把百 MB 的字节读进内存、也绝不触发 GitHub API 调用。
         if (cl > maxBodyBytes) {
             throw RequestTooLargeException(maxBodyBytes)
         }
-        val body: ByteArray
-        val bodyStream: InputStream?
-        if (cl > streamBodyLimit) {
-            // 大文件（>40MB）：不读入内存，交给 handler 延迟从输入流转发给 GitHub。
-            // LimitedInputStream 保证最多读到 content-length 字节，之后视为文件结束。
-            body = ByteArray(0)
-            bodyStream = LimitedInputStream(input, cl)
-        } else if (cl > 0) {
-            bodyStream = null
-            // 小文件：直接按 Content-Length 预分配精确数组并读满，避免 ByteArrayOutputStream
-            // 的 toByteArray() 再复制一份（峰值 = 2×body，默认堆必炸）。
-            body = ByteArray(cl.toInt())
+        val body = if (cl > 0) {
+            // 已通过上限检查（cl <= 100MB < Int.MAX_VALUE），toInt() 安全
+            // 直接按 Content-Length 预分配精确数组并读满，避免 ByteArrayOutputStream
+            // 的 toByteArray() 再复制一份（78MB 上传峰值 = 2×78MB，默认堆必炸）。
+            val bytes = ByteArray(cl.toInt())
             var offset = 0
             var remaining = cl
             while (remaining > 0) {
-                val n = input.read(body, offset, minOf(remaining, Int.MAX_VALUE.toLong()).toInt())
+                val n = input.read(bytes, offset, minOf(remaining, Int.MAX_VALUE.toLong()).toInt())
                 if (n < 0) throw IOException("eof in body")
                 offset += n
                 remaining -= n
             }
+            bytes
         } else {
-            body = ByteArray(0)
-            bodyStream = null
+            ByteArray(0)
         }
 
         val decodedPath = try {
@@ -197,7 +181,7 @@ class HttpServer(
         val keepAlive = headers["connection"]?.equals("keep-alive", true) != false
         val chunked = headers["transfer-encoding"]?.contains("chunked", true) == true
 
-        return HttpExchange(method, decodedPath, headers, body, keepAlive, chunked, bodyStream)
+        return HttpExchange(method, decodedPath, headers, body, keepAlive, chunked)
     }
 
     private fun readLine(input: InputStream): String? {
@@ -239,39 +223,6 @@ internal fun percentDecode(input: String): String {
     return String(out.toByteArray(), StandardCharsets.UTF_8)
 }
 
-/**
- * 限制读取上限的 InputStream：最多返回 maxBytes 字节，之后按 EOF 处理。
- * 用于大文件 PUT：body 以流形式交给 handler 边读边转发给 GitHub，
- * 读到 content-length 即结束，不会读入超限字节。
- */
-internal class LimitedInputStream(
-    private val delegate: InputStream,
-    private val maxBytes: Long,
-) : InputStream() {
-    private var remaining = maxBytes
-
-    override fun read(): Int {
-        if (remaining <= 0) return -1
-        val b = delegate.read()
-        if (b < 0) return -1
-        remaining--
-        return b
-    }
-
-    override fun read(b: ByteArray, off: Int, len: Int): Int {
-        if (remaining <= 0) return -1
-        val toRead = minOf(len.toLong(), remaining).toInt()
-        val n = delegate.read(b, off, toRead)
-        if (n < 0) return -1
-        remaining -= n
-        return n
-    }
-
-    override fun close() {
-        // 不关闭底层 socket 输入流（连接可能 keep-alive 复用）
-    }
-}
-
 /** 一次 HTTP 交换：请求字段 + 响应字段 */
 class HttpExchange(
     val method: String,
@@ -281,38 +232,21 @@ class HttpExchange(
     val keepAlive: Boolean,
     /** 请求体使用 Transfer-Encoding: chunked；本服务器不解析分块体，需由上层拒绝 */
     val chunked: Boolean = false,
-    /** 大文件请求体以流形式交给 handler 处理（不读入内存）；null = 使用 body */
-    val bodyStream: InputStream? = null,
 ) {
     var status: Int = 200
     var responseHeaders: MutableMap<String, String> = mutableMapOf()
     var bodyBytes: ByteArray = ByteArray(0)
-    /** 流式响应体：设置了它则以流形式写出（边下载边发客户端），优先于 bodyBytes */
-    var responseStream: InputStream? = null
 
     fun header(name: String): String? = headers[name.lowercase(Locale.US)]
-
-    /** 请求体是否为流式（大文件 PUT） */
-    val hasStreamBody: Boolean get() = bodyStream != null
 
     fun respond(status: Int, contentType: String? = null, body: ByteArray = ByteArray(0), extra: Map<String, String> = emptyMap()) {
         this.status = status
         if (contentType != null) responseHeaders["Content-Type"] = contentType
         responseHeaders.putAll(extra)
         bodyBytes = body
-        // 显式 respond(body=...) 时清除流式响应
-        responseStream = null
     }
 
-    /** 设置流式响应体（大文件下载用）；Content-Length 由调用方另行设置 */
-    fun respondStream(status: Int, stream: InputStream, extra: Map<String, String> = emptyMap()) {
-        this.status = status
-        responseHeaders.putAll(extra)
-        responseStream = stream
-        bodyBytes = ByteArray(0)
-    }
-
-    /** 将响应写到输出流（支持流式响应体） */
+    /** 将响应写到输出流 */
     fun writeTo(out: OutputStream) {
         val reason = reasonPhrase(status)
         val head = StringBuilder()
@@ -326,25 +260,7 @@ class HttpExchange(
         }
         head.append("\r\n")
         out.write(head.toString().toByteArray(StandardCharsets.ISO_8859_1))
-        val stream = responseStream
-        if (stream != null) {
-            try {
-                val buf = ByteArray(128 * 1024)
-                while (true) {
-                    val n = stream.read(buf)
-                    if (n < 0) break
-                    out.write(buf, 0, n)
-                }
-                out.flush()
-            } finally {
-                try {
-                    stream.close()
-                } catch (_: IOException) {
-                }
-            }
-        } else if (bodyBytes.isNotEmpty()) {
-            out.write(bodyBytes)
-        }
+        if (bodyBytes.isNotEmpty()) out.write(bodyBytes)
     }
 
     companion object {
