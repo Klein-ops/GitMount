@@ -219,7 +219,7 @@ class GitHubClient(private val token: String) {
         // 流式边传边算 SHA-256：用 DigestInputStream 包一层，写请求体时自动累计摘要，
         // 上传成功后 digest.digest() 即完整文件哈希（写进 LFS 指针，下载后可比对完整性）。
         val digest = java.security.MessageDigest.getInstance("SHA-256")
-        val digestInput = java.security.DigestInputStream(input, digest)
+        val digestInput = java.io.DigestInputStream(input, digest)
         val body = StreamingRawRequestBody(digestInput, maxBytes, totalBytes)
         val req = authRequest(uploadUrl)
             .header("Content-Type", "application/octet-stream")
