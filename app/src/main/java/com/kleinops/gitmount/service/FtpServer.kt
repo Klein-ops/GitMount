@@ -552,17 +552,33 @@ class FtpServer(
             reply(150, "开始下载")
             val dataSocket = openDataSocket() ?: return
             try {
-                var bytes = repo.read(path)
-                if (restartOffset in 1 until bytes.size.toLong()) {
-                    bytes = bytes.copyOfRange(restartOffset.toInt(), bytes.size)
+                // 流式下载：LFS 大文件（指针对应 Releases 资产）边下载边发给客户端，
+                // 不整读进内存（大文件 RETR 不 OOM）；小文件走整读（openReadStream 内部处理）。
+                val stream = repo.openReadStream(path)
+                stream.use { input ->
+                    // REST 断点续传：跳过 restartOffset 字节再发送
+                    var skip = restartOffset
+                    val skipBuf = ByteArray(64 * 1024)
+                    while (skip > 0) {
+                        val n = input.read(skipBuf, 0, minOf(skip, skipBuf.size.toLong()).toInt())
+                        if (n < 0) break
+                        skip -= n
+                    }
+                    val buf = ByteArray(128 * 1024)
+                    val out = dataSocket.getOutputStream()
+                    var total = 0L
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        total += n
+                    }
+                    out.flush()
+                    restartOffset = 0
+                    ServerController.addTraffic(0, total)
+                    dataSocket.close()
+                    reply(226, "下载完成")
                 }
-                restartOffset = 0
-                val out = dataSocket.getOutputStream()
-                out.write(bytes)
-                out.flush()
-                dataSocket.close()
-                ServerController.addTraffic(0, bytes.size.toLong())
-                reply(226, "下载完成")
             } catch (e: Exception) {
                 try {
                     dataSocket.close()
@@ -582,12 +598,19 @@ class FtpServer(
             val dataSocket = openDataSocket() ?: return
             try {
                 if (append && repo.exists(path)) {
+                    // LFS 大文件不支持 APPE（断点续传会读到指针文本当普通文件处理，破坏指针）
+                    if (repo.isLfsPointer(path)) {
+                        LogBus.warn("FTP APPE 拒绝：$path 是 LFS 大文件（GitHub Releases 不支持服务端追加）")
+                        dataSocket.close()
+                        reply(552, "大文件不支持断点续传（APPE）")
+                        return
+                    }
                     // APPE / 断点续传：需要先读已有内容再合并，只能内存路径。
                     // （GitHub Contents API 不支持服务端追加，仍保持原语义）
-                    val incoming = readLimited(dataSocket.getInputStream(), GitRepository.MAX_FILE_SIZE)
+                    val incoming = readLimited(dataSocket.getInputStream(), GitRepository.MAX_LFS_SIZE)
                         ?: run {
                             dataSocket.close()
-                            reply(552, "文件超过 ${GitRepository.MAX_FILE_SIZE / 1000 / 1000}MB 上限")
+                            reply(552, "文件超过 ${GitRepository.MAX_LFS_SIZE / 1000 / 1000 / 1000}GB 上限")
                             return
                         }
                     LogBus.info("FTP 收到上传数据 ${incoming.size} 字节（APPE）→ $path")
@@ -615,7 +638,7 @@ class FtpServer(
                     dataSocket.close()
                 } catch (_: IOException) {
                 }
-                reply(552, "文件超过 ${GitRepository.MAX_FILE_SIZE / 1000 / 1000}MB 上限，已本地拒绝（GitHub 不接受）")
+                reply(552, "文件超过 ${GitRepository.MAX_LFS_SIZE / 1000 / 1000 / 1000}GB 上限，已本地拒绝")
             } catch (e: OutOfMemoryError) {
                 LogBus.error("上传内存不足：${e.message}")
                 try {
