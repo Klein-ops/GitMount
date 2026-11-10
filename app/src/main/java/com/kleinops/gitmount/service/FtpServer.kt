@@ -5,7 +5,6 @@ import com.kleinops.gitmount.data.VfsNode
 import com.kleinops.gitmount.service.LogBus
 import java.io.BufferedReader
 import java.io.IOException
-import java.io.InputStream
 import java.io.InputStreamReader
 import java.io.OutputStream
 import java.net.InetAddress
@@ -582,20 +581,20 @@ class FtpServer(
             val dataSocket = openDataSocket() ?: return
             try {
                 if (append && repo.exists(path)) {
-                    // APPE / 断点续传：需要先读已有内容再合并，只能内存路径。
-                    // （GitHub Contents API 不支持服务端追加，仍保持原语义）
-                    val incoming = readLimited(dataSocket.getInputStream(), GitRepository.MAX_FILE_SIZE)
-                        ?: run {
-                            dataSocket.close()
-                            reply(552, "文件超过 ${GitRepository.MAX_FILE_SIZE / 1000 / 1000}MB 上限")
-                            return
-                        }
-                    LogBus.info("FTP 收到上传数据 ${incoming.size} 字节（APPE）→ $path")
-                    val finalBytes = repo.read(path) + incoming
-                    repo.write(path, finalBytes)
-                    LogBus.info("FTP 上传已写入 GitHub：$path（${finalBytes.size} 字节）")
+                    // APPE / 断点续传（GitHub Contents API 无服务端追加，语义 = 读旧+合并新 全量写回）。
+                    // 用 SequenceInputStream 把"旧内容 + 数据连接新内容"合并成一条流，
+                    // 走 writeStream 流式写回：内存峰值 = 旧文件（GitHub API 整块返回）+ 恒定缓冲，
+                    // 不再像旧实现那样"旧 + 新 + 合并"三份同时驻留（100MB 级文件必 OOM）。
+                    val oldBytes = repo.read(path)
+                    LogBus.info("FTP APPE 合并流上传 → $path（旧 ${oldBytes.size}B + 新数据）")
+                    val seq = java.io.SequenceInputStream(
+                        java.io.ByteArrayInputStream(oldBytes),
+                        dataSocket.getInputStream(),
+                    )
+                    val node = repo.writeStream(path, seq)
+                    LogBus.info("FTP 上传已写入 GitHub：$path（${node.size} 字节）")
                     dataSocket.close()
-                    ServerController.addTraffic(incoming.size.toLong(), 0)
+                    ServerController.addTraffic((node.size - oldBytes.size).coerceAtLeast(0), 0)
                     reply(226, "上传完成")
                 } else {
                     // 常规 STOR：流式转发——数据连接收到的字节边收边 base64 推给 GitHub
@@ -631,39 +630,6 @@ class FtpServer(
                 }
                 reply(550, "写入失败：${e.message}")
             }
-        }
-
-        /** 流式读取数据连接，最多读 limit 字节；超过则返回 null（由调用方中断并回 552） */
-        private fun readLimited(input: InputStream, limit: Long): ByteArray? {
-            val readBuf = ByteArray(64 * 1024)
-            // 自管理字节数组 + 固定 1MB 增量扩容：
-            // - 相比 ByteArrayOutputStream 的翻倍扩容（64MB→128MB 时新旧并存峰值 192MB），
-            //   这里峰值 ≈ 数据量 + 1MB，78MB 文件在默认堆下不会 OOM；
-            // - 固定增量保证扩容次数少（78MB 约 78 次），均摊复制成本可接受。
-            var data = ByteArray(0)
-            var size = 0
-            while (true) {
-                val n = try {
-                    input.read(readBuf)
-                } catch (e: java.net.SocketTimeoutException) {
-                    // 客户端发完数据但未关闭数据连接（在等 226）时，空闲超时判定传输结束。
-                    // 若不超时判定，服务端会永久阻塞在 read() 等待 EOF，出现“传到最后卡住”。
-                    LogBus.warn("FTP 数据连接空闲超时，按传输结束处理（已收 ${size} 字节）")
-                    break
-                } catch (e: IOException) {
-                    return java.util.Arrays.copyOf(data, size)
-                }
-                if (n < 0) break
-                if (size.toLong() + n > limit) return null
-                if (size + n > data.size) {
-                    val need = size + n
-                    val newCap = need.coerceAtLeast(data.size + 1024 * 1024)
-                    data = java.util.Arrays.copyOf(data, newCap)
-                }
-                System.arraycopy(readBuf, 0, data, size, n)
-                size += n
-            }
-            return java.util.Arrays.copyOf(data, size)
         }
 
         private fun doDelete(arg: String) {

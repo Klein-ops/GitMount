@@ -100,9 +100,13 @@ class HttpServer(
                         keepAlive = exchange.keepAlive
                         try {
                             handler(exchange)
+                            // 先回响应：客户端（尤其失败路径）收到响应后即停止发送，
+                            // 再清理剩余请求体；keep-alive 下残留 body 会污染下一个请求的解析。
                             exchange.writeTo(output)
-                            // 流量打点：请求体=上传，响应体=下载（含目录列表/元数据等）
-                            ServerController.addTraffic(exchange.body.size.toLong(), exchange.bodyBytes.size.toLong())
+                            val drained = exchange.drainBody()
+                            // 流量打点：请求体=上传（流式上传用实际写入字节数），响应体=下载
+                            ServerController.addTraffic(exchange.requestBytes, exchange.bodyBytes.size.toLong())
+                            if (!drained) break
                         } catch (e: Exception) {
                             // 处理器抛异常时回 500
                             try {
@@ -112,6 +116,8 @@ class HttpServer(
                                 err.writeTo(output)
                             } catch (_: IOException) {
                             }
+                            // 异常时剩余请求体可能未消费，连接状态不可靠，断开避免污染下一个请求
+                            break
                         }
                         output.flush()
                         if (!exchange.keepAlive) break
@@ -147,30 +153,10 @@ class HttpServer(
         }
 
         val cl = headers["content-length"]?.toLongOrNull() ?: 0L
-        // 关键：在【读取 body 之前】就拦截超大上传。
-        // 超大文件本来就会被 GitRepository.MAX_FILE_SIZE 拒绝，提前在这里挡掉，
-        // 可以完全避免把百 MB 的字节读进内存、也绝不触发 GitHub API 调用。
+        // 超大上传（> GitHub 兜底上限 100MB）：直接 413，不读 body、响应后断开连接。
         if (cl > maxBodyBytes) {
             throw RequestTooLargeException(maxBodyBytes)
         }
-        val body = if (cl > 0) {
-            // 已通过上限检查（cl <= 100MB < Int.MAX_VALUE），toInt() 安全
-            // 直接按 Content-Length 预分配精确数组并读满，避免 ByteArrayOutputStream
-            // 的 toByteArray() 再复制一份（78MB 上传峰值 = 2×78MB，默认堆必炸）。
-            val bytes = ByteArray(cl.toInt())
-            var offset = 0
-            var remaining = cl
-            while (remaining > 0) {
-                val n = input.read(bytes, offset, minOf(remaining, Int.MAX_VALUE.toLong()).toInt())
-                if (n < 0) throw IOException("eof in body")
-                offset += n
-                remaining -= n
-            }
-            bytes
-        } else {
-            ByteArray(0)
-        }
-
         val decodedPath = try {
             // 注意：不能用 URLDecoder.decode——它会把路径里的 '+' 变成空格，
             // 导致名为 "a+b.txt" 的文件无法访问。这里只还原 %XX 转义。
@@ -181,7 +167,24 @@ class HttpServer(
         val keepAlive = headers["connection"]?.equals("keep-alive", true) != false
         val chunked = headers["transfer-encoding"]?.contains("chunked", true) == true
 
-        return HttpExchange(method, decodedPath, headers, body, keepAlive, chunked)
+        // 小请求体（≤1MB，如 MKCOL/PROPFIND/MOVE 的少量 XML）直接读入缓存，
+        // 方便大多数 handler 无脑用 exchange.body；大上传（PUT）由 handler 走
+        // exchange.bodyStream 流式消费（writeStream），绝不把百 MB 请求体整读进内存。
+        return if (cl in 1..(1024 * 1024)) {
+            val bytes = ByteArray(cl.toInt())
+            var offset = 0
+            while (offset < cl) {
+                val n = input.read(bytes, offset, (cl - offset).toInt())
+                if (n < 0) throw IOException("eof in body")
+                offset += n
+            }
+            HttpExchange(method, decodedPath, headers, bytes, keepAlive, chunked,
+                contentLength = cl, bodyStream = null)
+        } else {
+            HttpExchange(method, decodedPath, headers, ByteArray(0), keepAlive, chunked,
+                contentLength = if (cl > 0) cl else 0L,
+                bodyStream = if (cl > 0) HttpBodyStream(LimitedInputStream(input, cl)) else null)
+        }
     }
 
     private fun readLine(input: InputStream): String? {
@@ -232,10 +235,25 @@ class HttpExchange(
     val keepAlive: Boolean,
     /** 请求体使用 Transfer-Encoding: chunked；本服务器不解析分块体，需由上层拒绝 */
     val chunked: Boolean = false,
+    /** 请求体总长度（Content-Length）；无 body 时为 0 */
+    val contentLength: Long = 0L,
+    /**
+     * 大请求体的原始流（≤1MB 的小请求体已被读入 [body]，此字段为 null）。
+     *
+     * 供 handler 做流式消费（WebDAV PUT → repo.writeStream），
+     * 避免把百 MB 请求体整读进内存导致 OOM。
+     * 该流已包上 [HttpBodyStream]：SocketTimeoutException 会被转成 IOException
+     * （HTTP 语义下“客户端暂停”不应被当作“发完了”），并限定最多读到 contentLength 字节，
+     * keep-alive 下不会越界吃掉下一个请求的字节。
+     */
+    val bodyStream: InputStream? = null,
 ) {
     var status: Int = 200
     var responseHeaders: MutableMap<String, String> = mutableMapOf()
     var bodyBytes: ByteArray = ByteArray(0)
+
+    /** 实际上传字节数（流量统计用）：大文件流式上传时由 handler 写入实际值 */
+    var requestBytes: Long = body.size.toLong()
 
     fun header(name: String): String? = headers[name.lowercase(Locale.US)]
 
@@ -244,6 +262,19 @@ class HttpExchange(
         if (contentType != null) responseHeaders["Content-Type"] = contentType
         responseHeaders.putAll(extra)
         bodyBytes = body
+    }
+
+    /** 丢弃请求体剩余字节（keep-alive 必须清空，否则残留 body 会污染下一个请求的解析）。
+     *  返回是否可继续复用连接：读不完（连接已坏）返回 false，由外层断开。 */
+    fun drainBody(): Boolean {
+        val s = bodyStream ?: return true
+        return try {
+            val buf = ByteArray(8192)
+            while (s.read(buf) >= 0) { /* 丢弃 */ }
+            true
+        } catch (_: IOException) {
+            false
+        }
     }
 
     /** 将响应写到输出流 */
@@ -274,5 +305,50 @@ class HttpExchange(
             423 -> "Locked"; 500 -> "Internal Server Error"; 501 -> "Not Implemented"
             503 -> "Service Unavailable"; else -> "Unknown"
         }
+    }
+}
+
+/** 限定最多读取 limit 字节，之后返回 EOF；防止 keep-alive 下越界读走下一个请求的字节。 */
+private class LimitedInputStream(private val underlying: InputStream, private val limit: Long) : InputStream() {
+    private var remaining = limit
+
+    override fun read(): Int {
+        if (remaining <= 0) return -1
+        val b = underlying.read()
+        if (b < 0) return -1
+        remaining--
+        return b
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int {
+        if (remaining <= 0) return -1
+        val want = minOf(len.toLong(), remaining).toInt()
+        val n = underlying.read(b, off, want)
+        if (n < 0) return -1
+        remaining -= n
+        return n
+    }
+
+    override fun close() = underlying.close()
+}
+
+/**
+ * 把 SocketTimeoutException 转成普通 IOException。
+ * 流式上传（StreamingBase64RequestBody）会把 SocketTimeoutException 当作
+ * “客户端发完数据但未关闭连接”（FTP 语义）；对 HTTP 而言这是错误的——
+ * HTTP 客户端发完 body 必定等待响应，长时间无数据只可能是暂停/断连，
+ * 应作为失败处理（断开/500），绝不能静默截断文件。
+ */
+private class HttpBodyStream(stream: InputStream) : java.io.FilterInputStream(stream) {
+    override fun read(): Int = try {
+        super.read()
+    } catch (e: java.net.SocketTimeoutException) {
+        throw IOException("请求体读取超时：${e.message}")
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int = try {
+        super.read(b, off, len)
+    } catch (e: java.net.SocketTimeoutException) {
+        throw IOException("请求体读取超时：${e.message}")
     }
 }

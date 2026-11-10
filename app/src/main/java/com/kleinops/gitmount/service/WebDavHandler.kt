@@ -241,7 +241,12 @@ class WebDavHandler(
             return
         }
         try {
-            val node = repo.write(path, exchange.body)
+            // 流式上传：大请求体走 exchange.bodyStream（HttpServer 不整读进内存），
+            // 小请求体（≤1MB）已读入 exchange.body。统一经 writeStream 边读边 base64 推 GitHub，
+            // 无论传多大，本地内存占用恒定（≈8KB 缓冲），低内存设备也不会 OOM。
+            val input = exchange.bodyStream ?: java.io.ByteArrayInputStream(exchange.body)
+            val node = repo.writeStream(path, input)
+            exchange.requestBytes = node.size
             exchange.respond(
                 201,
                 extra = mapOf(
