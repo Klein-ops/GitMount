@@ -139,6 +139,18 @@ class GitHubClient(
         })
         .build()
 
+    /**
+     * Range 探测专用 OkHttp：短超时（connect 8s / read 12s）。
+     * 探测只是发个 GET + Range: bytes=0-0 验证认证与分片支持，理论上秒回；
+     * 若某个认证模式/站点在弱网下卡住，用短超时快速失败换下一种认证/降级单流，
+     * 绝不让"认证探测"拖成几十秒的阻塞（FTP 场景这会直接拖死整个 RETR）。
+     */
+    private val probeClient = OkHttpClient.Builder()
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(12, TimeUnit.SECONDS)
+        .writeTimeout(12, TimeUnit.SECONDS)
+        .build()
+
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
 
     private fun url(path: String): String = "https://api.github.com$path"
@@ -528,7 +540,8 @@ class GitHubClient(
             .addHeader("Accept", "application/octet-stream")
             .addHeader("Range", "bytes=0-0")
         builder.header("X-GitHub-Api-Version", "2022-11-28")
-        val resp = assetClient.newCall(builder.build()).execute()
+        // 探测用短超时 client：认证探测失败应快速降级/换认证，不拖慢整体下载
+        val resp = probeClient.newCall(builder.build()).execute()
         try {
             return when {
                 resp.code == 206 -> RangeProbe.OK
@@ -601,6 +614,15 @@ class GitHubClient(
                         lastErr = e
                         if (attempt < PARALLEL_RETRY) {
                             LogBus.warn("LFS 分片 $part（$start-$end）第 $attempt 次失败（${e.message}），重试…")
+                            // 重试退避：第 1 次失败等 500ms，第 2 次等 2000ms。
+                            // 32 片若同时失败同时重试，会瞬间再打爆 CDN 连接数造成集体再失败；
+                            // 退避让重试错峰，显著提高重试成功率。
+                            try {
+                                Thread.sleep(if (attempt == 1) 500L else 2000L)
+                            } catch (_: InterruptedException) {
+                                Thread.currentThread().interrupt()
+                                break
+                            }
                         }
                     }
                 }
@@ -1264,7 +1286,37 @@ private class SequentialPartsStream(
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
             throw IOException("LFS 分片 $i 下载被中断", e)
+        } catch (e: java.util.concurrent.CancellationException) {
+            // 流已关闭、任务被取消（close 的 pool.shutdownNow）时 get() 抛此异常
+            throw IOException("LFS 分片 $i 下载已取消（流关闭）", e)
         }
+    }
+
+    override fun skip(n: Long): Long {
+        if (closed) throw IOException("流已关闭")
+        if (n <= 0) return 0
+        var remaining = n
+        // 逐片跳过：当前片剩余字节直接用 FileInputStream.skip（快），不够再切下一片。
+        // 不重写的话 InputStream 默认 skip 会逐字节 read，156MB 断点续传会跳过极慢。
+        while (remaining > 0) {
+            if (index >= files.size) break
+            val stream = current
+            if (stream == null) {
+                awaitPart(index)
+                current = java.io.FileInputStream(files[index])
+                continue
+            }
+            val skipped = stream.skip(remaining)
+            if (skipped > 0) {
+                remaining -= skipped
+            } else {
+                // 当前片 skip 无法前进（接近片尾），切下一片
+                stream.close()
+                current = null
+                index++
+            }
+        }
+        return n - remaining
     }
 
     override fun read(): Int {

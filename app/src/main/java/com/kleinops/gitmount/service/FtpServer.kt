@@ -562,20 +562,39 @@ class FtpServer(
                 reply(554, "REST 偏移超出文件大小")
                 return
             }
+            // 关键修复（首字节空窗）：必须先打开内容流，再回 150 建立数据连接。
+            // LFS 大文件分片下载的直链认证探测（最多 3 次 HTTP GET）+ 32 线程池创建
+            // + 全部分片任务提交都发生在 openReadStream 内部；若放到 150/数据连接
+            // 之后（旧顺序），慢网下客户端连上数据端口后要干等 30~90 秒才收到
+            // 第一个字节，文件管理器首字节超时判定"连接已断开"并自动重试，
+            // 每次重试又在同一位置断——正是"一开始下载就不停提示连接已断开、
+            // 反复断五六次"的根因。先开流则探测/分片全部提前完成（客户端此时
+            // 还在等 150，无感知），数据连接一 accept 立即吐出首个字节。
+            val input = try {
+                repo.openReadStream(path)
+            } catch (e: Exception) {
+                reply(550, "读取失败：${e.message}")
+                return
+            }
             reply(150, "开始下载")
-            val dataSocket = openDataSocket() ?: return
+            val dataSocket = openDataSocket()
+            if (dataSocket == null) {
+                // 客户端未连入数据连接：释放流（取消分片任务、清理临时文件）
+                runCatching { input.close() }
+                return
+            }
             try {
                 var total = 0L
                 // 流式下载：LFS 大文件走 Releases 资产流（边下边转，不驻留内存）；
                 // 普通小文件走内存读取。REST 断点通过跳过 offset 字节实现。
-                repo.openReadStream(path).use { input ->
+                input.use { inputStream ->
                     val out = dataSocket.getOutputStream()
                     var skip = restartOffset
                     // 精确跳过：FilterInputStream.skip() 可能少跳，循环保证跳到指定偏移
                     while (skip > 0) {
-                        val n = input.skip(skip)
+                        val n = inputStream.skip(skip)
                         if (n <= 0) {
-                            if (input.read() == -1) break
+                            if (inputStream.read() == -1) break
                             skip -= 1
                         } else {
                             skip -= n
@@ -584,7 +603,7 @@ class FtpServer(
                     restartOffset = 0
                     val buf = ByteArray(128 * 1024)
                     while (true) {
-                        val n = input.read(buf)
+                        val n = inputStream.read(buf)
                         if (n < 0) break
                         out.write(buf, 0, n)
                         total += n
