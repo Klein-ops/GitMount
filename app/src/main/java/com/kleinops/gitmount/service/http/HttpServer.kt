@@ -22,9 +22,9 @@ class HttpServer(
     private val handler: (HttpExchange) -> Unit,
     /** 绑定地址；null/0.0.0.0 = 监听所有网卡（局域网），127.0.0.1 = 仅本机 */
     private val bindAddress: String? = null,
-    /** 请求体上限：超过时在读 body 之前直接回 413，避免超大上传白白占用内存/带宽
-     *  与 GitRepository.MAX_FILE_SIZE（40MB 本地拦截线）保持一致 */
-    private val maxBodyBytes: Long = 40L * 1000 * 1000,
+    /** 请求体上限：超过时在读 body 之前直接回 413，避免超大上传把整个 body 读进内存导致 OOM。
+     *  与 GitRepository.MAX_FILE_SIZE（已取消 40MB 拦截，仅保留 100MB GitHub 上限兜底）保持一致 */
+    private val maxBodyBytes: Long = 100L * 1000 * 1000,
 ) {
     private val serverSocket = ServerSocket().apply {
         // 必须显式 reuseAddress：增量同步会"停旧监听→立即用同端口重新 bind"，

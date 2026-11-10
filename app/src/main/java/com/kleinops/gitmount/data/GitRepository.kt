@@ -40,14 +40,15 @@ class GitRepository(
         private const val CACHE_TTL_MS = 30_000L
 
         /**
-         * 单文件上限：本地拦截阈值。
+         * 单文件上限：已取消 40MB 本地拦截（用户要求）。
+         * 40MB 以上的文件不再本地拒绝，直接发给 GitHub，由其决定是否接受
+         * （实测 41.5MB 可以成功上传，此前 40MB 拦截线拦得太狠）。
          *
-         * 实测（2026-11-01，Klein-ops/api-streaming-test）：GitHub Contents API
-         * 原始字节上限约 40MiB（41.5MB 成功、40MiB-1 = 41,943,039B 已 422 拒绝），
-         * 远低于文档宣称的 100MB。这里取 40,000,000B（40MB）做保守本地拦截：
-         * 超过直接拒绝，不再把数据发给 GitHub 等它 422（省 API 调用、免白等）。
+         * 这里仅保留 GitHub 文档上限 100MB 作为最后兜底：超过 100MB 的
+         * 请求体（base64 后更大）读进内存会撑爆应用堆，且 GitHub 必然拒绝，
+         * 提前挡掉可以避免 OOM / 白耗带宽。
          */
-        const val MAX_FILE_SIZE = 40L * 1000 * 1000
+        const val MAX_FILE_SIZE = 100L * 1000 * 1000
 
         /** 文件内容缓存仅用于 ≤1MB 的小文件 */
         private const val FILE_CACHE_TTL_MS = 60_000L
