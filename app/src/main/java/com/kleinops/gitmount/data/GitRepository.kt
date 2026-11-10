@@ -31,12 +31,6 @@ class GitRepository(
     private val owner: String,
     private val repo: String,
     private val branch: String,
-    /**
-     * 大文件上传临时落盘目录（FTP 场景数据连接无总长度，需先把剩余流
-     * 写入临时文件统计字节数，再以已知 Content-Length 上传 GitHub）。
-     * 由 MountService 传入 cacheDir；为 null 时未知长度大文件上传直接报错。
-     */
-    private val spoolDir: java.io.File? = null,
 ) {
 
     companion object {
@@ -51,21 +45,9 @@ class GitRepository(
          * 实测（2026-11-01，Klein-ops/api-streaming-test）：GitHub Contents API
          * 原始字节上限约 40MiB（41.5MB 成功、40MiB-1 = 41,943,039B 已 422 拒绝），
          * 远低于文档宣称的 100MB。这里取 40,000,000B（40MB）做保守本地拦截：
-         * 超过走 Releases 大文件通道，不再发给 Contents API。
+         * 超过直接拒绝，不再把数据发给 GitHub 等它 422（省 API 调用、免白等）。
          */
         const val MAX_FILE_SIZE = 40L * 1000 * 1000
-
-        /**
-         * LFS 通道单文件上限：GitHub Releases 单资产上限 2GB。
-         * 超过 40MB 的文件改走 Releases（仓库里只留指针），超过 2GB 仍拒绝。
-         */
-        const val MAX_LFS_SIZE = 2L * 1000 * 1000 * 1000
-
-        /** LFS 指针文件魔数（首行），用于识别指针与普通小文件的边界 */
-        const val LFS_MAGIC = "gitmount-lfs-v1"
-
-        /** LFS 桶的固定 tag（每仓库一个，容纳全部大文件资产） */
-        const val LFS_RELEASE_TAG = "gitmount-lfs"
 
         /** 文件内容缓存仅用于 ≤1MB 的小文件 */
         private const val FILE_CACHE_TTL_MS = 60_000L
@@ -77,56 +59,6 @@ class GitRepository(
          * 清空全部缓存把内存还给系统（下次访问自然重建）。
          */
         const val IDLE_RECLAIM_MS = 5L * 60 * 1000
-
-        /** 指针大小可解析的信任上限：超过该大小的文件几乎不可能是指针，跳过内容读取省配额 */
-        private const val POINTER_MAX_BYTES = 8 * 1024
-    }
-
-    /** LFS 指针内容（解析自仓库里的指针文件） */
-    data class LfsPointer(
-        val assetId: Long,
-        val size: Long,
-        val sha256: String,
-        val uploadedAt: Long,
-        /** 资产文件名（直链下载需要：github.com/.../releases/download/{tag}/{file}）；
-         * 旧版指针无此字段，解析后为 ""，下载自动 fallback 到 API 通道。 */
-        val fileName: String = "",
-    ) {
-        fun toText(): String = buildString {
-            appendLine(LFS_MAGIC)
-            append("asset_id=").append(assetId).append('\n')
-            append("size=").append(size).append('\n')
-            append("sha256=").append(sha256).append('\n')
-            append("uploaded_at=").append(uploadedAt).append('\n')
-            append("file_name=").append(fileName).append('\n')
-        }
-
-        companion object {
-            fun parse(text: String): LfsPointer? {
-                val lines = text.lines()
-                if (lines.firstOrNull() != LFS_MAGIC) return null
-                var assetId = -1L
-                var size = -1L
-                var sha256 = ""
-                var uploadedAt = 0L
-                var fileName = ""
-                for (line in lines.drop(1)) {
-                    val idx = line.indexOf('=')
-                    if (idx <= 0) continue
-                    val key = line.substring(0, idx)
-                    val value = line.substring(idx + 1)
-                    when (key) {
-                        "asset_id" -> assetId = value.toLongOrNull() ?: -1L
-                        "size" -> size = value.toLongOrNull() ?: -1L
-                        "sha256" -> sha256 = value.trim()
-                        "uploaded_at" -> uploadedAt = value.toLongOrNull() ?: 0L
-                        "file_name" -> fileName = value.trim()
-                    }
-                }
-                if (assetId <= 0 || size < 0) return null
-                return LfsPointer(assetId, size, sha256, uploadedAt, fileName)
-            }
-        }
     }
 
     private class CacheEntry(val nodes: List<VfsNode>, val at: Long)
@@ -135,25 +67,6 @@ class GitRepository(
 
     private val dirCache = ConcurrentHashMap<String, CacheEntry>()
     private val fileCache = ConcurrentHashMap<String, FileCacheEntry>()
-
-    /** 指针解析结果缓存条目（pointer 为 null = 已确认非指针） */
-    private class PointerEntry(val pointer: LfsPointer?)
-
-    /** 指针解析结果缓存：norm path -> PointerEntry。
-     * 旧版只缓存 size、解析结果每次都要重新读文件内容，导致 stat/list 对指针文件
-     * 反复 GET 打爆配额。这里缓存完整解析结果（含空结果），invalidate 时清除。
-     * 注意：ConcurrentHashMap 禁止 null value，必须用包装类容纳 null 指针。 */
-    private val pointerCache = ConcurrentHashMap<String, PointerEntry>()
-
-    /** LFS 桶 release id 缓存（首次获取后缓存，避免每次上传/删除都查接口） */
-    @Volatile
-    private var lfsReleaseId: Long = -1L
-
-    /** 桶存在性检查标志（false=未检查；避免无 LFS 桶的仓库 list 时对每个小文件读内容解析指针打爆配额） */
-    @Volatile
-    private var lfsBucketChecked = false
-    @Volatile
-    private var hasLfsBucket = false
 
     /** 文件缓存总字节数（写入时累加、清空时归零，用于限制内存占用） */
     private val fileCacheBytes = java.util.concurrent.atomic.AtomicLong(0)
@@ -176,7 +89,6 @@ class GitRepository(
         if (now - lastActiveAt > IDLE_RECLAIM_MS) {
             dirCache.clear()
             fileCache.clear()
-            pointerCache.clear()
             fileCacheBytes.set(0)
         }
         lastActiveAt = now
@@ -191,7 +103,6 @@ class GitRepository(
     fun forceRelease() {
         dirCache.clear()
         fileCache.clear()
-        pointerCache.clear()
         fileCacheBytes.set(0)
     }
 
@@ -232,12 +143,10 @@ class GitRepository(
         if (path == null) {
             dirCache.clear()
             fileCache.clear()
-            pointerCache.clear()
             fileCacheBytes.set(0)
         } else {
             dirCache.remove(normalize(path))
             evictFile(normalize(path))
-            pointerCache.remove(normalize(path))
         }
     }
 
@@ -259,130 +168,6 @@ class GitRepository(
         fileCacheBytes.addAndGet(bytes.size.toLong())
     }
 
-    // ---------- LFS（GitHub Releases 大文件通道） ----------
-
-    /**
-     * 生成唯一的 LFS 资产名（同 release 内必须唯一，重复会 422）。
-     * 指针文件里存的是 asset_id，资产名只用于人类识别，因此用时间+随机数即可，
-     * 绝不能依赖"路径扁平化名"——不同路径（/a/b.txt 与 /a_b.txt）会撞名。
-     */
-    private fun newLfsAssetName(): String =
-        "gm-${System.currentTimeMillis()}-${(100000..999999).random()}"
-
-    /** 获取（必要时创建）LFS 桶 release id；结果缓存到实例字段 */
-    private fun ensureLfsRelease(): Long {
-        val cached = lfsReleaseId
-        if (cached > 0) return cached
-        val id = client.getOrCreateLfsRelease(owner, repo, LFS_RELEASE_TAG)
-        lfsReleaseId = id
-        lfsBucketChecked = true
-        hasLfsBucket = true
-        return id
-    }
-
-    /** 仓库是否已有 LFS 桶（惰性检查一次并缓存结果） */
-    private fun hasLfsBucket(): Boolean {
-        if (lfsBucketChecked) return hasLfsBucket
-        val id = try {
-            client.getLfsReleaseIfExists(owner, repo, LFS_RELEASE_TAG)
-        } catch (e: Exception) {
-            null
-        }
-        lfsBucketChecked = true
-        hasLfsBucket = id != null
-        if (id != null) lfsReleaseId = id
-        return hasLfsBucket
-    }
-
-    /**
-     * 迁移旧版 draft LFS 桶为发布态（下载直链的前提）。
-     * 挂载激活时由 MountPointManager 调用；内部吞掉全部异常，失败不影响挂载。
-     */
-    fun publishLfsReleaseIfDraft() {
-        try {
-            client.publishLfsReleaseIfDraft(owner, repo, LFS_RELEASE_TAG)
-        } catch (e: Exception) {
-            LogBus.warn("LFS 桶发布迁移失败（忽略，API 通道仍可用）：${e.message}")
-        }
-    }
-
-    /**
-     * 读取指针文件内容并尝试解析为 LFS 指针；结果（含 null=非指针）缓存到 pointerCache。
-     * 只对 ≤ POINTER_MAX_BYTES 的小文件尝试解析（指针必然极小）。
-     */
-    private fun tryReadPointer(norm: String): LfsPointer? {
-        pointerCache[norm]?.let { return it.pointer }
-        val bytes = try {
-            read(norm)
-        } catch (e: Exception) {
-            return null
-        }
-        if (bytes.size > POINTER_MAX_BYTES) return null
-        val ptr = LfsPointer.parse(String(bytes, Charsets.UTF_8))
-        pointerCache[norm] = PointerEntry(ptr)
-        return ptr
-    }
-
-    /** 该路径是否为大文件（LFS 指针，真实内容在 Releases 桶） */
-    fun isLfsPointer(path: String): Boolean = tryReadPointer(normalize(path)) != null
-
-    /**
-     * 写 LFS 指针文件到仓库（Contents 通道，同路径同文件名）。
-     * 覆盖时先取最新 sha 做乐观锁；返回指针文件的 VfsNode（对外 size 显示真实大小）。
-     */
-    private fun writePointerFile(
-        norm: String,
-        pointer: LfsPointer,
-        existingSha: String?,
-        commitMessage: String?,
-    ): VfsNode {
-        val text = pointer.toText().toByteArray(Charsets.UTF_8)
-        val meta = client.putFile(owner, repo, toGitPath(norm), text, existingSha, commitMessage ?: "上传 ${nameOf(norm)}", branch)
-        invalidate(parentOf(norm))
-        invalidate(norm)
-        return VfsNode(nameOf(norm), norm, false, pointer.size, meta.sha)
-    }
-
-    /**
-     * 打开文件内容读取流（供 WebDAV GET 流式下载；FTP RETR 也用）。
-     * 若目标是指针文件（大文件在 Releases），返回 Releases 资产下载流（由调用方关闭，
-     * 关闭时释放 OkHttp Response）；普通文件读入内存返回 ByteArrayInputStream。
-     * 下载路径不持有任何锁（只有上传/删除需要 writeLock），绝不与写操作互相卡死。
-     */
-    fun openReadStream(path: String): java.io.InputStream {
-        reclaimIfIdle()
-        val norm = normalize(path)
-        if (norm == "/") throw IOException("不能读取目录")
-        val pointer = tryReadPointer(norm)
-        if (pointer != null) {
-            LogBus.info("LFS 下载开始：$norm ← release asset ${pointer.assetId}（${pointer.size} 字节）")
-            return client.openLfsAssetStream(owner, repo, LFS_RELEASE_TAG, pointer)
-        }
-        return java.io.ByteArrayInputStream(read(norm))
-    }
-
-    /**
-     * 流式读取文件内容到 output（边下载边写，不驻留内存）。
-     * 若目标是指针文件（大文件在 Releases），改为从 Releases 资产流式下载；
-     * 普通小文件直接读入内存写下游。
-     * @return 实际写出的字节数
-     */
-    fun readStream(path: String, output: java.io.OutputStream): Long {
-        val stream = openReadStream(path)
-        stream.use { input ->
-            val buf = ByteArray(128 * 1024)
-            var total = 0L
-            while (true) {
-                val n = input.read(buf)
-                if (n < 0) break
-                output.write(buf, 0, n)
-                total += n
-            }
-            output.flush()
-            return total
-        }
-    }
-
     /** 列目录（带 TTL 缓存） */
     fun list(path: String, useCache: Boolean = true): List<VfsNode> {
         reclaimIfIdle()
@@ -393,23 +178,11 @@ class GitRepository(
         }
         val nodes = try {
             client.listDir(owner, repo, toGitPath(norm), branch).map { e ->
-                var size = e.size
-                // 仅当仓库确实存在 LFS 桶时才尝试把小文件解析为指针（否则不读内容，
-                // 避免普通小文件仓库 list 时每文件多打一次 GET 耗尽配额）
-                if (e.type != "dir" && e.size <= POINTER_MAX_BYTES && hasLfsBucket()) {
-                    val childPath = if (norm == "/") "/${e.name}" else "$norm/${e.name}"
-                    val cached = pointerCache[childPath]
-                    if (cached != null) {
-                        cached.pointer?.let { size = it.size }
-                    } else {
-                        tryReadPointer(childPath)?.let { size = it.size }
-                    }
-                }
                 VfsNode(
                     name = e.name,
                     path = if (norm == "/") "/${e.name}" else "$norm/${e.name}",
                     isDirectory = e.type == "dir",
-                    size = size,
+                    size = e.size,
                     sha = e.sha,
                 )
             }
@@ -485,17 +258,15 @@ class GitRepository(
 
     /**
      * 写入文件（自动判断新建还是覆盖）。
-     *
-     * ≤40MB 走 GitHub Contents API（历史通道）；
-     * >40MB 走 GitHub Releases 大文件通道：先把内容上传到 LFS 桶拿 assetId，
-     * 再在仓库写同路径指针文件（对外透明，大小显示真实字节数）。
      * 覆盖时总是先取最新 sha，避免客户端缓存过期导致 409 冲突。
      */
     fun write(path: String, data: ByteArray, commitMessage: String? = null): VfsNode {
         reclaimIfIdle()
         val norm = normalize(path)
         if (norm == "/") throw IOException("不能写入根目录")
-        if (data.size > MAX_LFS_SIZE) throw FileTooLargeException(MAX_LFS_SIZE)
+        if (data.size > MAX_FILE_SIZE) {
+            throw FileTooLargeException(MAX_FILE_SIZE)
+        }
         // 串行化写阶段：并发大文件上传会叠加内存峰值并触发 GitHub 409，
         // 见 writeLock 注释。ReentrantLock 可重入，move/copy 递归调用 write 不会死锁。
         writeLock.lock()
@@ -503,197 +274,44 @@ class GitRepository(
             ensureParentDirs(norm)
             val gitPath = toGitPath(norm)
             val existing = client.getFileMeta(owner, repo, gitPath, branch)
-            if (data.size > MAX_FILE_SIZE) {
-                // 大文件通道：Releases 资产 + 指针
-                deleteOldAssetIfAny(norm)
-                val releaseId = ensureLfsRelease()
-                val asset = client.uploadLfsAsset(
-                    owner, repo, releaseId, newLfsAssetName(),
-                    data.inputStream(), MAX_LFS_SIZE, data.size.toLong(),
-                )
-                val ptr = LfsPointer(asset.assetId, asset.size, asset.sha256, System.currentTimeMillis(), asset.fileName)
-                writePointerFile(norm, ptr, existing?.sha, commitMessage)
-            } else {
-                writeContents(norm, data, existing, commitMessage)
-            }
+            val msg = commitMessage ?: if (existing == null) "上传 ${nameOf(norm)}" else "更新 ${nameOf(norm)}"
+            val meta = client.putFile(owner, repo, gitPath, data, existing?.sha, msg, branch)
+            invalidate(parentOf(norm))
+            invalidate(norm)
+            VfsNode(nameOf(norm), norm, false, data.size.toLong(), meta.sha)
         } finally {
             writeLock.unlock()
         }
     }
 
     /**
-     * 流式写入文件（创建或覆盖）。
+     * 流式写入文件（创建或覆盖）：直接读输入流产线转发给 GitHub，不把整个文件驻留内存。
      *
-     * 核心约束（2026-11-09 实测）：GitHub 的 uploads.github.com 与 Contents API
-     * **都拒绝 Transfer-Encoding: chunked**，强制要求请求带已知 Content-Length。
-     * 因此本方法按以下规则分流：
-     * - knownLength != null 且 > MAX_FILE_SIZE：直接流式走 Releases 通道（固定长度上传资产 + 写指针），
-     *   不整读内存（WebDAV PUT 场景：HTTP Content-Length 已知）。
-     * - knownLength != null 且 ≤ MAX_FILE_SIZE：读入内存走 Contents putFile（固定长度，≤40MB 峰值可控）。
-     * - knownLength == null（FTP 数据连接无长度）：先把流完整落盘到 spool 临时文件统计总字节数，
-     *   再按总长分流（≤40MB 读内存走 Contents；>40MB 用 FileInputStream + 已知长度走 Releases）。
-     *   内存占用恒定（128KB 缓冲 + 小文件 ≤40MB），彻底移除旧版 readProbe 探测 40MB+1 的峰值。
+     * 用于 FTP 上传：数据连接收到的字节边收边 base64 发往 GitHub（chunked），
+     * FTP 客户端的进度会被 GitHub 公网真实上传速度拖住，
+     * 消除"客户端 100% 但 GitHub 才刚开始传"的假完成。
      *
      * @param input 上传数据流；调用方需配置 soTimeout，read 空闲超时（SocketTimeoutException）
      *              视为数据已发完（与 readLimited 的 DATA_IDLE_TIMEOUT 语义一致）。
-     * @param knownLength 数据流总长度；未知传 null（FTP 场景由内部 spool 统计）
      */
-    fun writeStream(
-        path: String,
-        input: java.io.InputStream,
-        commitMessage: String? = null,
-        knownLength: Long? = null,
-    ): VfsNode {
+    fun writeStream(path: String, input: java.io.InputStream, commitMessage: String? = null): VfsNode {
         reclaimIfIdle()
         val norm = normalize(path)
         if (norm == "/") throw IOException("不能写入根目录")
-        if (knownLength != null && knownLength > MAX_LFS_SIZE) throw FileTooLargeException(MAX_LFS_SIZE)
         // 与 write 同一把锁：串行化写阶段，避免并发上传叠加内存峰值 / GitHub 409
         writeLock.lock()
         return try {
             ensureParentDirs(norm)
             val gitPath = toGitPath(norm)
             val existing = client.getFileMeta(owner, repo, gitPath, branch)
-            // 已知长度的大文件：全流式直传 Releases（固定 Content-Length，无探测、无整读内存）
-            if (knownLength != null && knownLength > MAX_FILE_SIZE) {
-                return writeLfsStream(norm, input, knownLength, existing, commitMessage)
-            }
-            // 长度未知（FTP 数据连接）：先落盘统计总长度，再按长度分流。
-            // 不再用 readProbe 探测 40MB+1 字节到内存——那正是旧版 FTP 上传内存膨胀的根源。
-            if (knownLength == null) {
-                val (tmp, totalBytes) = spoolStream(input)
-                try {
-                    if (totalBytes > MAX_LFS_SIZE) throw FileTooLargeException(MAX_LFS_SIZE)
-                    if (totalBytes > MAX_FILE_SIZE) {
-                        java.io.FileInputStream(tmp).use { fileIn ->
-                            return writeLfsStream(norm, fileIn, totalBytes, existing, commitMessage)
-                        }
-                    } else {
-                        return writeContents(norm, tmp.readBytes(), existing, commitMessage)
-                    }
-                } finally {
-                    tmp.delete()
-                }
-            }
-            // 已知长度的小文件（≤40MB）：读入内存走 Contents（固定长度）
-            writeContents(norm, readAll(input, knownLength ?: 0L), existing, commitMessage)
+            val msg = commitMessage ?: if (existing == null) "上传 ${nameOf(norm)}" else "更新 ${nameOf(norm)}"
+            val meta = client.putFileStream(owner, repo, gitPath, input, existing?.sha, msg, branch)
+            invalidate(parentOf(norm))
+            invalidate(norm)
+            VfsNode(nameOf(norm), norm, false, meta.size, meta.sha)
         } finally {
             writeLock.unlock()
         }
-    }
-
-    /** 小文件写 Contents 通道（固定长度）：先删旧资产（若有指针），再 putFile */
-    private fun writeContents(
-        norm: String,
-        data: ByteArray,
-        existing: FileMeta?,
-        commitMessage: String?,
-    ): VfsNode {
-        // 小文件覆盖大文件：旧文件若是指针（真实内容在 Releases），先删其资产
-        deleteOldAssetIfAny(norm)
-        val msg = commitMessage ?: if (existing == null) "上传 ${nameOf(norm)}" else "更新 ${nameOf(norm)}"
-        val meta = client.putFile(owner, repo, toGitPath(norm), data, existing?.sha, msg, branch)
-        invalidate(parentOf(norm))
-        invalidate(norm)
-        return VfsNode(nameOf(norm), norm, false, data.size.toLong(), meta.sha)
-    }
-
-    /**
-     * LFS 大文件公共上传流程：删除旧资产（若有）→ ensure 桶 → 已知长度流式上传
-     * → 写指针文件。长度已知（GitHub 拒绝 chunked，必须带固定 Content-Length）。
-     */
-    private fun writeLfsStream(
-        norm: String,
-        input: java.io.InputStream,
-        totalBytes: Long,
-        existing: FileMeta?,
-        commitMessage: String?,
-    ): VfsNode {
-        deleteOldAssetIfAny(norm)
-        val releaseId = ensureLfsRelease()
-        val asset = client.uploadLfsAsset(owner, repo, releaseId, newLfsAssetName(), input, MAX_LFS_SIZE, totalBytes)
-        val ptr = LfsPointer(asset.assetId, asset.size, asset.sha256, System.currentTimeMillis(), asset.fileName)
-        return writePointerFile(norm, ptr, existing?.sha, commitMessage)
-    }
-
-    /**
-     * 覆盖写入前清理旧 LFS 资产：读旧指针（若有）拿精确 asset_id 删除，
-     * 绝不按名猜（防撞名误删）；404 = 资产已被外部清理，忽略。
-     */
-    private fun deleteOldAssetIfAny(norm: String) {
-        val oldPointer = tryReadPointer(norm)
-        if (oldPointer != null && oldPointer.assetId > 0) {
-            try {
-                client.deleteLfsAsset(owner, repo, oldPointer.assetId)
-            } catch (e: GitHubApiException) {
-                if (e.code != 404) throw e
-            }
-        }
-    }
-
-    /**
-     * 把输入流完整落盘到临时文件，返回 (临时文件, 写入总字节数)。
-     *
-     * 用于 FTP 大文件上传：数据连接无总长度 → 先写满临时文件统计字节，
-     * 再以已知 Content-Length 上传 GitHub（GitHub 拒绝 chunked）。
-     * 内存占用恒定（128KB 缓冲），彻底解决旧版 readProbe 探测大文件到内存的膨胀问题。
-     * 自动校验不超过 MAX_LFS_SIZE；失败时清理临时文件。
-     */
-    private fun spoolStream(input: java.io.InputStream): Pair<java.io.File, Long> {
-        val dir = spoolDir
-            ?: throw IOException("大文件上传需要临时目录（FTP 模式需配置应用缓存目录）")
-        if (!dir.exists()) dir.mkdirs()
-        val tmp = java.io.File.createTempFile("gm-upload-", ".tmp", dir)
-        try {
-            var total = 0L
-            java.io.FileOutputStream(tmp).use { out ->
-                val buf = ByteArray(128 * 1024)
-                while (true) {
-                    val n = try {
-                        input.read(buf)
-                    } catch (e: java.net.SocketTimeoutException) {
-                        break // 客户端发完数据但未关闭数据连接（在等 226），视为传输结束
-                    }
-                    if (n < 0) break
-                    total += n
-                    if (total > MAX_LFS_SIZE) {
-                        throw FileTooLargeException(MAX_LFS_SIZE)
-                    }
-                    out.write(buf, 0, n)
-                }
-            }
-            return tmp to total
-        } catch (e: Exception) {
-            tmp.delete()
-            throw e
-        }
-    }
-
-    /** 从输入流读取至多 limit 字节；limit>0 时精确读满 limit 即停（不等待 EOF，防 keep-alive 卡死） */
-    private fun readAll(input: java.io.InputStream, limit: Long): ByteArray {
-        if (limit <= 0) return ByteArray(0)
-        val readBuf = ByteArray(64 * 1024)
-        var data = ByteArray(0)
-        var size = 0
-        while (size.toLong() < limit) {
-            val want = minOf(readBuf.size.toLong(), limit - size).toInt()
-            val n = try {
-                input.read(readBuf, 0, want)
-            } catch (e: java.net.SocketTimeoutException) {
-                break
-            } catch (e: java.io.IOException) {
-                break
-            }
-            if (n < 0) break
-            size += n
-            if (size > data.size) {
-                val need = size
-                val newCap = need.coerceAtLeast(data.size + 1024 * 1024)
-                data = java.util.Arrays.copyOf(data, newCap)
-            }
-            System.arraycopy(readBuf, 0, data, size - n, n)
-        }
-        return java.util.Arrays.copyOf(data, size)
     }
 
     /** 创建目录：GitHub 无空目录，用 .gitkeep 占位 */
@@ -775,25 +393,9 @@ class GitRepository(
      * 本服务内写操作互斥，但仓库仍可能被外部（网页端、其他客户端）改动，
      * 或存在未知时序，导致删除时 sha 已过期。这里捕获 422 后重新读取最新
      * sha 再删一次——一次重试足以覆盖"读取列表 → 删除"窗口期的时效竞争。
-     *
-     * 若目标是指针文件（大文件在 Releases），默认先删除对应资产再删指针文件：
-     * 两者必须都成功才算删除完成，且资产删除先行（避免删了指针后资产泄漏）。
-     * @param deleteLinkedAsset 是否删除指针关联的 Releases 资产。为 false 时
-     *        只删指针文件（move 搬指针用：资产被目标指针继续引用，不能删）。
      */
-    private fun deleteFileWithRetry(norm: String, node: VfsNode, deleteLinkedAsset: Boolean = true) {
+    private fun deleteFileWithRetry(norm: String, node: VfsNode) {
         val gitPath = toGitPath(norm)
-        // 先尝试解析指针（指针必然极小，读内容成本低；非指针返回 null 走普通删除）
-        if (deleteLinkedAsset) {
-            val pointer = tryReadPointer(norm)
-            if (pointer != null) {
-                try {
-                    client.deleteLfsAsset(owner, repo, pointer.assetId)
-                } catch (e: GitHubApiException) {
-                    if (e.code != 404) throw e // 404 = 资产已被删，继续删指针即可
-                }
-            }
-        }
         try {
             client.deleteFile(owner, repo, gitPath, node.sha, "删除 ${node.name}", branch)
         } catch (e: GitHubApiException) {
@@ -838,24 +440,12 @@ class GitRepository(
             }
             delete(from)
         } else {
-            val pointer = tryReadPointer(from)
-            if (pointer != null) {
-                // LFS 大文件移动：资产在 Releases 不迁移，只需把指针文件复制到目标
-                // （写新指针 → 删源指针【不删资产】）。避免整读大文件重传、也避免删资产。
-                LogBus.info("移动 LFS 大文件（${pointer.size} 字节）→ $from -> $to")
-                ensureParentDirs(to)
-                val existing = client.getFileMeta(owner, repo, toGitPath(to), branch)
-                if (existing != null) throw IOException("目标已存在：$to")
-                writePointerFile(to, pointer, null, "移动 ${node.name}")
-                deleteFileWithRetry(from, node, deleteLinkedAsset = false)
-            } else {
-                LogBus.info("移动文件（${node.size} 字节）→ 下载源...")
-                val data = read(from)
-                LogBus.info("源已下载（${data.size} 字节）→ 上传目标...")
-                write(to, data, "移动 ${node.name}")
-                LogBus.info("目标已上传 → 删除源...")
-                delete(from)
-            }
+            LogBus.info("移动文件（${node.size} 字节）→ 下载源...")
+            val data = read(from)
+            LogBus.info("源已下载（${data.size} 字节）→ 上传目标...")
+            write(to, data, "移动 ${node.name}")
+            LogBus.info("目标已上传 → 删除源...")
+            delete(from)
         }
         LogBus.info("移动完成 → $from -> $to")
     }
@@ -891,32 +481,8 @@ class GitRepository(
                 copy(child.path, "$to/${child.name}")
             }
         } else {
-            val pointer = tryReadPointer(from)
-            if (pointer != null) {
-                // LFS 大文件复制：GitHub 不允许在 Releases 内复制资产，
-                // 走"流式下载源资产 → 流式上传新资产"（不整读内存），再写新指针。
-                LogBus.info("复制 LFS 大文件（${pointer.size} 字节）→ $from -> $to")
-                writeLock.lock()
-                try {
-                    ensureParentDirs(to)
-                    val existing = client.getFileMeta(owner, repo, toGitPath(to), branch)
-                    if (existing != null) throw IOException("目标已存在：$to")
-                    val releaseId = ensureLfsRelease()
-                    val src = client.openLfsAssetStream(owner, repo, LFS_RELEASE_TAG, pointer)
-                    val asset = try {
-                        client.uploadLfsAsset(owner, repo, releaseId, newLfsAssetName(), src, MAX_LFS_SIZE, pointer.size)
-                    } finally {
-                        src.close()
-                    }
-                    val newPtr = LfsPointer(asset.assetId, asset.size, asset.sha256, System.currentTimeMillis(), asset.fileName)
-                    writePointerFile(to, newPtr, null, "复制 ${node.name}")
-                } finally {
-                    writeLock.unlock()
-                }
-            } else {
-                val data = read(from)
-                write(to, data, "复制 ${node.name}")
-            }
+            val data = read(from)
+            write(to, data, "复制 ${node.name}")
         }
     }
 

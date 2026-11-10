@@ -33,13 +33,6 @@ object MountPointManager {
     private val entries = ConcurrentHashMap<String, ActiveEntry>()
     private val createLock = Object()
 
-    /**
-     * 大文件上传临时落盘目录（FTP 数据连接无长度，需先落盘统计总字节数再上传）。
-     * 由 MountService 在 onCreate 设置（应用 cacheDir）；未配置时 FTP 大文件上传会明确报错。
-     */
-    @Volatile
-    var spoolDir: java.io.File? = null
-
     /** 挂载点最近活跃刷新（WebDavHandler / FtpServer 在认证通过/每次操作后调用） */
     fun touch(mountPointId: String) {
         entries[mountPointId]?.touch()
@@ -60,9 +53,7 @@ object MountPointManager {
             entry.activeOps++
             try {
                 val token = mountPoint.effectiveToken(sharedToken)
-                val repo = GitRepository(GitHubClient(token, spoolDir), mountPoint.owner, mountPoint.repoName, mountPoint.branch, spoolDir)
-                // 迁移旧版 draft LFS 桶为发布态（下载直链的前提）；失败不阻断挂载
-                repo.publishLfsReleaseIfDraft()
+                val repo = GitRepository(GitHubClient(token), mountPoint.owner, mountPoint.repoName, mountPoint.branch)
                 repo.visibleList("/") // 连通性探测：确保仓库真实可读
                 entry.repo = repo
                 entry.touch()

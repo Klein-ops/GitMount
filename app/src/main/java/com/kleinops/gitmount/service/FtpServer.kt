@@ -549,69 +549,19 @@ class FtpServer(
 
         private fun doRetr(arg: String) {
             val path = resolve(arg)
-            val node = try {
-                repo.stat(path)
-            } catch (e: Exception) {
-                null
-            }
-            if (node == null) {
-                reply(550, "文件不存在")
-                return
-            }
-            if (restartOffset > node.size) {
-                reply(554, "REST 偏移超出文件大小")
-                return
-            }
-            // 关键修复（首字节空窗）：必须先打开内容流，再回 150 建立数据连接。
-            // LFS 大文件分片下载的直链认证探测（最多 3 次 HTTP GET）+ 32 线程池创建
-            // + 全部分片任务提交都发生在 openReadStream 内部；若放到 150/数据连接
-            // 之后（旧顺序），慢网下客户端连上数据端口后要干等 30~90 秒才收到
-            // 第一个字节，文件管理器首字节超时判定"连接已断开"并自动重试，
-            // 每次重试又在同一位置断——正是"一开始下载就不停提示连接已断开、
-            // 反复断五六次"的根因。先开流则探测/分片全部提前完成（客户端此时
-            // 还在等 150，无感知），数据连接一 accept 立即吐出首个字节。
-            val input = try {
-                repo.openReadStream(path)
-            } catch (e: Exception) {
-                reply(550, "读取失败：${e.message}")
-                return
-            }
             reply(150, "开始下载")
-            val dataSocket = openDataSocket()
-            if (dataSocket == null) {
-                // 客户端未连入数据连接：释放流（取消分片任务、清理临时文件）
-                runCatching { input.close() }
-                return
-            }
+            val dataSocket = openDataSocket() ?: return
             try {
-                var total = 0L
-                // 流式下载：LFS 大文件走 Releases 资产流（边下边转，不驻留内存）；
-                // 普通小文件走内存读取。REST 断点通过跳过 offset 字节实现。
-                input.use { inputStream ->
-                    val out = dataSocket.getOutputStream()
-                    var skip = restartOffset
-                    // 精确跳过：FilterInputStream.skip() 可能少跳，循环保证跳到指定偏移
-                    while (skip > 0) {
-                        val n = inputStream.skip(skip)
-                        if (n <= 0) {
-                            if (inputStream.read() == -1) break
-                            skip -= 1
-                        } else {
-                            skip -= n
-                        }
-                    }
-                    restartOffset = 0
-                    val buf = ByteArray(128 * 1024)
-                    while (true) {
-                        val n = inputStream.read(buf)
-                        if (n < 0) break
-                        out.write(buf, 0, n)
-                        total += n
-                    }
-                    out.flush()
+                var bytes = repo.read(path)
+                if (restartOffset in 1 until bytes.size.toLong()) {
+                    bytes = bytes.copyOfRange(restartOffset.toInt(), bytes.size)
                 }
+                restartOffset = 0
+                val out = dataSocket.getOutputStream()
+                out.write(bytes)
+                out.flush()
                 dataSocket.close()
-                ServerController.addTraffic(0, total)
+                ServerController.addTraffic(0, bytes.size.toLong())
                 reply(226, "下载完成")
             } catch (e: Exception) {
                 try {
@@ -648,9 +598,9 @@ class FtpServer(
                     ServerController.addTraffic(incoming.size.toLong(), 0)
                     reply(226, "上传完成")
                 } else {
-                    // 常规 STOR：数据连接无总长度 → writeStream 内部先落盘 spool 统计总字节数，
-                    // 再按长度分流（≤40MB 走 Contents 固定长度；>40MB 走 Releases 固定长度）。
-                    // 内存占用恒定（128KB 缓冲），彻底解决旧版 FTP 上传内存膨胀。
+                    // 常规 STOR：流式转发——数据连接收到的字节边收边 base64 推给 GitHub
+                    // （chunked），FTP 客户端的进度被 GitHub 公网真实上传速度拖住，
+                    // 不再出现“客户端 100% 但 GitHub 才开始传”的假完成。
                     LogBus.info("FTP 流式上传开始 → $path")
                     val node = repo.writeStream(path, dataSocket.getInputStream())
                     LogBus.info("FTP 上传已写入 GitHub：$path（${node.size} 字节）")
@@ -665,7 +615,7 @@ class FtpServer(
                     dataSocket.close()
                 } catch (_: IOException) {
                 }
-                reply(552, "文件超过 ${GitRepository.MAX_LFS_SIZE / 1000 / 1000 / 1000}GB 上限，已本地拒绝（GitHub 不接受）")
+                reply(552, "文件超过 ${GitRepository.MAX_FILE_SIZE / 1000 / 1000}MB 上限，已本地拒绝（GitHub 不接受）")
             } catch (e: OutOfMemoryError) {
                 LogBus.error("上传内存不足：${e.message}")
                 try {

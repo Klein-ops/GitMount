@@ -198,32 +198,26 @@ class WebDavHandler(
             exchange.respond(404)
             return
         }
-        // 流式下载：大文件（LFS 指针→Releases 资产）边下边转发，不整读内存；
-        // 普通小文件走内存读取。HEAD 不读 body，只回响应头。
-        try {
-            if (exchange.method == "HEAD") {
-                exchange.respond(
-                    200,
-                    contentType = mimeType(node.name),
-                    body = ByteArray(0),
-                    extra = mapOf(
-                        "Content-Disposition" to "inline",
-                        "ETag" to "\"${node.sha}\"",
-                        "Content-Length" to node.size.toString(),
-                    ),
-                )
-                return
-            }
-            val stream = repo.openReadStream(path)
-            exchange.status = 200
-            exchange.responseHeaders["Content-Type"] = mimeType(node.name)
-            exchange.responseHeaders["Content-Disposition"] = "inline"
-            exchange.responseHeaders["ETag"] = "\"${node.sha}\""
-            // 显式 Content-Length：流式响应可用 available() 不可靠，必须用节点真实大小
-            exchange.responseHeaders["Content-Length"] = node.size.toString()
-            exchange.responseStream = stream
+        val bytes = try {
+            repo.read(path)
         } catch (e: Exception) {
             exchange.respond(500, body = e.message?.toByteArray() ?: ByteArray(0))
+            return
+        }
+        exchange.respond(
+            200,
+            contentType = mimeType(node.name),
+            body = bytes,
+            extra = mapOf(
+                "Content-Disposition" to "inline",
+                "ETag" to "\"${node.sha}\"",
+            ),
+        )
+        // HEAD 由 HttpServer 以 GET 相同逻辑执行，但避免发送 body 由上层判断
+        if (exchange.method == "HEAD") {
+            exchange.bodyBytes = ByteArray(0)
+            // 修正 Content-Length 为文件大小
+            exchange.responseHeaders["Content-Length"] = bytes.size.toString()
         }
     }
 
@@ -242,21 +236,12 @@ class WebDavHandler(
             return
         }
         val contentLength = exchange.header("content-length")?.toLongOrNull() ?: 0L
-        if (contentLength > GitRepository.MAX_LFS_SIZE) {
+        if (contentLength > GitRepository.MAX_FILE_SIZE) {
             exchange.respond(413)
             return
         }
         try {
-            val node = if (exchange.bodyFile != null) {
-                // 大文件（HTTP body 已落盘到临时文件）：流式直传 GitHub
-                // （≤40MB 走 Contents 固定长度；>40MB 走 Releases 固定长度）。
-                // FileInputStream 按已知长度读满即停，不整读内存、不等待 EOF。
-                java.io.FileInputStream(exchange.bodyFile).use { fileIn ->
-                    repo.writeStream(path, fileIn, knownLength = contentLength)
-                }
-            } else {
-                repo.write(path, exchange.body)
-            }
+            val node = repo.write(path, exchange.body)
             exchange.respond(
                 201,
                 extra = mapOf(
