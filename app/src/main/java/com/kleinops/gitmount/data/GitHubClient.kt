@@ -175,6 +175,56 @@ class GitHubClient(
     }
 
     /**
+     * 按资产 ID 查询 LFS 资产元数据，返回该资产的直链（browser_download_url）。
+     * 关键用途：旧版指针无 fileName 字段（file_name=""）时，仍能通过 assetId
+     * 查一次 API 拿到资产名并构造 github.com/releases/download 直链——
+     * 避免走 api.github.com 资产下载通道（该通道在国内网络极慢，302→CDN 二次跳转，
+     * 分片下载单片几十秒下不完，客户端数据连接收不到字节 → Read timed out）。
+     * 查不到（404/无 browser_download_url）返回 null，调用方 fallback 到 API 通道。
+     */
+    private fun resolveLfsDirectUrl(owner: String, repo: String, assetId: Long): String? {
+        return try {
+            // 用短超时 probeClient 查元数据（connect 8s / read 12s）：
+            // 这是下载前的一次辅助查询，弱网下应快速失败 fallback 到 API 通道，
+            // 绝不能用全局 client（120s）把整个开流拖死（FTP 场景首字节空窗会超时）。
+            val builder = authRequest(url("/repos/$owner/$repo/releases/assets/$assetId")).get()
+            probeClient.newCall(builder.build()).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    LogBus.warn("按 assetId 查直链失败（HTTP ${resp.code}），fallback API 通道")
+                    return null
+                }
+                val obj = JSONObject(resp.body?.string().orEmpty())
+                val direct = obj.optString("browser_download_url", "")
+                if (direct.isNotBlank()) direct else null
+            }
+        } catch (e: Exception) {
+            LogBus.warn("按 assetId 查直链失败（${e.message}），fallback API 通道")
+            null
+        }
+    }
+
+    /**
+     * 根据指针解析可用的下载直链（优先），返回 null 表示无直链需走 API 通道。
+     * 指针带 fileName → 直接拼 releases/download 直链；
+     * 指针无 fileName 但 assetId 有效 → 查一次 API 拿 browser_download_url；
+     * 两者都无 → null。
+     */
+    private fun resolveDirectUrl(owner: String, repo: String, tag: String, pointer: GitRepository.LfsPointer): String? {
+        if (pointer.fileName.isNotBlank()) {
+            val fileNameEnc = java.net.URLEncoder.encode(pointer.fileName, "UTF-8").replace("+", "%20")
+            return "https://github.com/$owner/$repo/releases/download/$tag/$fileNameEnc"
+        }
+        if (pointer.assetId > 0) {
+            val direct = resolveLfsDirectUrl(owner, repo, pointer.assetId)
+            if (direct != null) {
+                LogBus.info("LFS 旧指针按资产ID解析到直链：$direct")
+            }
+            return direct
+        }
+        return null
+    }
+
+    /**
      * 单文件接口的响应必须是 JSON 对象。
      * 若路径实际是目录，GitHub 返回 JSON 数组；旧实现直接 JSONObject(body) 会抛
      * JSONException（"Value [...] cannot be converted to JSONObject"），
@@ -424,16 +474,16 @@ class GitHubClient(
         return openLfsSingle(owner, repo, tag, pointer)
     }
 
-    /** 单连接流式下载（v2 直链三重认证 + API fallback，原逻辑） */
+    /** 单连接流式下载（直链三重认证 + API fallback，原逻辑） */
     private fun openLfsSingle(owner: String, repo: String, tag: String, pointer: GitRepository.LfsPointer?): java.io.InputStream {
-        // 直链优先：指针携带 fileName 且桶已发布（tag 对应 release 存在）时走浏览器直链。
+        // 直链优先：指针携带 fileName 直接构造直链；旧指针无 fileName 但 assetId 有效时
+        // 查资产元数据拿 browser_download_url 同样走直链（绕开 api.github.com 慢通道）。
         // 私有仓库：直链第一跳必须带认证（github.com 认证通过才 302 到带签名的 CDN URL，
         // CDN 那跳靠 URL 签名、不需要再认证）。github.com 网页端点对 Bearer 兼容性弱于
         // API 网关，因此按 Bearer → token → Basic(x-access-token) 顺序尝试，401/403 换下一种，
         // 全部失败才 fallback 到 API 资产端点（保证私有仓库一定能下）。
-        if (pointer != null && pointer.fileName.isNotBlank()) {
-            val fileNameEnc = java.net.URLEncoder.encode(pointer.fileName, "UTF-8").replace("+", "%20")
-            val directUrl = "https://github.com/$owner/$repo/releases/download/$tag/$fileNameEnc"
+        val directUrl = pointer?.let { resolveDirectUrl(owner, repo, tag, it) }
+        if (directUrl != null) {
             var authTried = listOf<DirectAuthMode>()
             for (auth in listOf(DirectAuthMode.BEARER, DirectAuthMode.TOKEN, DirectAuthMode.BASIC)) {
                 authTried = authTried + auth
@@ -464,11 +514,14 @@ class GitHubClient(
 
     /**
      * 解析 LFS 资产的下载站点（URL + 认证模式 + 是否支持 Range），供分片并行下载复用。
-     * 直链优先（fileName 非空）：按 Bearer → token → Basic 顺序探测，
+     * 直链优先：指针带 fileName 直接构造 releases/download 直链；旧指针无 fileName
+     * 但 assetId 有效时查资产元数据拿 browser_download_url 同样走直链——
+     * 绕开 api.github.com 资产慢通道（该通道国内极慢，分片单片几十秒下不完，
+     * 客户端数据连接收不到字节 → Read timed out）。
      * 探测用 GET + Range: bytes=0-0——一次同时验证认证与 Range 支持
      * （206 = 支持分片；200 = 站点存在但不支持 Range；401/403 换下一种认证）。
-     * 直链全部不可用或无 fileName → fallback API 资产端点（BEARER）。
-     * @return null 表示指针无效（无资产 ID 且无 fileName）
+     * 直链全部不可用或无直链 → fallback API 资产端点（BEARER）。
+     * @return null 表示指针无效（无资产 ID 且无直链）
      */
     private fun resolveLfsSite(
         owner: String,
@@ -476,9 +529,8 @@ class GitHubClient(
         tag: String,
         pointer: GitRepository.LfsPointer,
     ): Triple<String, DirectAuthMode, Boolean>? {
-        if (pointer.fileName.isNotBlank()) {
-            val fileNameEnc = java.net.URLEncoder.encode(pointer.fileName, "UTF-8").replace("+", "%20")
-            val directUrl = "https://github.com/$owner/$repo/releases/download/$tag/$fileNameEnc"
+        val directUrl = resolveDirectUrl(owner, repo, tag, pointer)
+        if (directUrl != null) {
             for (auth in listOf(DirectAuthMode.BEARER, DirectAuthMode.TOKEN, DirectAuthMode.BASIC)) {
                 try {
                     when (probeRange(directUrl, auth)) {
