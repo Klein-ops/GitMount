@@ -417,22 +417,22 @@ class MountService : Service() {
         val main = mountPoints.first()
         val mainMode = runCatching { ServerMode.valueOf(main.mode) }.getOrDefault(ServerMode.WEBDAV)
         val st = ServerController.state.value
-        // 主挂载点实际是否仅本机：全局强制优先，其次主挂载点单独开关
-        val mainLoopback = main.effectiveLoopback(settings.loopbackOnly)
-        val mainIp = if (mainLoopback) "127.0.0.1" else (st.lanIp ?: NetUtils.lanIpv4())
+        // 局域网 IP 按"是否存在任一非仅本机的挂载点"计算：
+        // 只要还有挂载点监听局域网，就保留 IP 供主界面展示，不随主挂载点的 loopback 设置清空
+        val anyLan = mountPoints.any { !it.effectiveLoopback(settings.loopbackOnly) }
         ServerController.update {
             it.copy(
                 mode = mainMode,
                 port = main.port,
                 username = main.username,
                 password = main.password,
-                lanIp = if (mainLoopback) null else mainIp,
+                lanIp = if (anyLan) (st.lanIp ?: NetUtils.lanIpv4()) else null,
                 loopbackOnly = settings.loopbackOnly,
             )
         }
         updateNotification(
-            getString(R.string.notif_running, mainMode.label, main.port),
-            endpointText(mainMode, mainIp, main.port),
+            getString(R.string.notif_running),
+            getString(R.string.notif_running_mount_point_count, mountPoints.size),
         )
     }
 
@@ -622,28 +622,27 @@ class MountService : Service() {
                         }
                     }
 
-                    // 状态与通知：取第一个已启用挂载点作为通知的主展示（仅用于通知标题/地址，
-                    // 主界面已按全部挂载点分别展示各自的状态与地址）
+                    // 状态与通知：取第一个已启用挂载点作为 State 的主展示（主界面按全部
+                    // 挂载点分别展示各自的状态与地址）；通知只报运行状态 + 已启用挂载点数量。
                     val main = mountPoints.first()
                     val mainMode = runCatching { ServerMode.valueOf(main.mode) }.getOrDefault(ServerMode.WEBDAV)
-                    val mainLoopback = main.effectiveLoopback(globalLoopback)
-                    // 通知地址按主挂载点实际绑定状态：仅本机 → 127.0.0.1；否则局域网 IP（可能为 null）
-                    val mainIp = if (mainLoopback) "127.0.0.1" else lanIp
                     ServerController.setState(
                         ServerController.State(
                             running = true,
                             starting = false,
                             mode = mainMode,
                             port = main.port,
-                            lanIp = if (mainLoopback) null else lanIp,
+                            // lanIp 已按"是否存在任一局域网挂载点"（anyLan）算好，
+                            // 不随主挂载点的 loopback 设置清空，保证其他挂载点地址显示正确
+                            lanIp = lanIp,
                             username = main.username,
                             password = main.password,
                             loopbackOnly = settings.loopbackOnly,
                         )
                     )
                     updateNotification(
-                        getString(R.string.notif_running, mainMode.label, main.port),
-                        endpointText(mainMode, mainIp, main.port),
+                        getString(R.string.notif_running),
+                        getString(R.string.notif_running_mount_point_count, mountPoints.size),
                     )
                     // 启动周期空闲回收：每 10 分钟统一清扫一次超时挂载点
                     startReclaimLoop()
@@ -685,11 +684,6 @@ class MountService : Service() {
             "无法连接 GitHub（网络不通或超时），请检查网络后重试"
         is IllegalStateException -> e.message ?: "配置不完整，请检查设置"
         else -> e.message ?: "未知错误"
-    }
-
-    private fun endpointText(mode: ServerMode, ip: String?, port: Int): String? {
-        if (ip == null) return null
-        return if (mode == ServerMode.WEBDAV) "http://$ip:$port/" else "ftp://$ip:$port/"
     }
 
     /**
